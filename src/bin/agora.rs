@@ -1,8 +1,15 @@
 //! agora — niri workspace manager CLI
 //!
-//! Thin client to agorad. See VISION.html §8 for the command surface.
+//! Thin client to agorad. Each subcommand maps to one IPC round-trip.
+//! See VISION.html §8 for the full command surface.
 
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
+
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+
+use agora::ipc::{self, Payload, Request, Response};
 
 #[derive(Parser)]
 #[command(
@@ -13,32 +20,61 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Cmd>,
+    command: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Add a project (stub)
-    Add,
-    /// List projects (stub)
+    /// Add a project rooted at PATH (default: current directory)
+    Add {
+        /// Project name (becomes its id and default workspace name)
+        name: String,
+        /// Root directory
+        #[arg(default_value = ".")]
+        path: String,
+    },
+    /// List all projects
     List,
-    /// Open a project (stub)
-    Open,
-    /// Forget a project from MRU (stub)
-    Forget,
-    /// Manage roots within a project (stub)
-    Root,
-    /// Rename a project (stub)
-    Rename,
-    /// Show daemon / project status (stub)
-    Status,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Some(c) => println!("{:?}: TODO", std::any::type_name_of_val(&c)),
-        None => println!("agora v{} — run with --help", env!("CARGO_PKG_VERSION")),
+        Cmd::Add { name, path } => {
+            let payload = call(Request::Add {
+                name,
+                root_path: path,
+            })?;
+            let Payload::Project(p) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            println!("added: {} -> {}", p.id, p.roots[0].path);
+        }
+        Cmd::List => {
+            let payload = call(Request::List)?;
+            let Payload::Projects(projects) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            if projects.is_empty() {
+                println!("(no projects)");
+            } else {
+                for p in projects {
+                    let path = p.roots.first().map(|r| r.path.as_str()).unwrap_or("?");
+                    println!("{}\t{}", p.id, path);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn call(req: Request) -> Result<Payload> {
+    let path = ipc::socket_path()?;
+    let stream = UnixStream::connect(&path)
+        .with_context(|| format!("connect to agorad at {}", path.display()))?;
+    let mut reader = BufReader::new(stream.try_clone().context("clone stream")?);
+    let mut writer = stream;
+    ipc::write_line(&mut writer, &req)?;
+    let resp: Response = ipc::read_line(&mut reader)?;
+    resp.into_result()
 }
