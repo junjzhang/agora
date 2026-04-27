@@ -293,7 +293,7 @@ Project (workspace)
   <li>Project-level surface 是 workspace 内不属于任何 issue 的 column——比如 project 根目录的常驻 terminal</li>
 </ul>
 
-<p class="callout warn"><span class="label">技术注记</span>niri 的 column 没有稳定 id（layout 层运行时状态）。manager 内部追踪通过 "记一个 column 内任意活 window 的 id"，运行时通过 <code>window.workspace_id + window.column_index</code> 反推 column 归属。</p>
+<p class="callout"><span class="label">技术注记 <span class="badge decided">实测</span></span>niri-ipc 的 <code>Window</code> event 直接给出 <code>workspace_id</code> 和 <code>layout.pos_in_scrolling_layout: [col, row]</code>。column 不需要独立 entity——"一个 column" = 同 workspace 同 col 的所有 window。manager 不存 column id，运行时按 <code>(workspace_id, col)</code> group 即可。</p>
 
 <h3>3.3 Project 数据结构</h3>
 
@@ -397,6 +397,38 @@ launchers = [{ kind = "kitty" }]</code></pre>
   Mod+H/L    → 换 issue / project-level column   ← niri scroll 的核心价值
   Mod+Up/Dn  → 换 surface (column 内 stack 切换)
 </div>
+
+<h3>4.1 数据来源 <span class="badge decided">niri-ipc 实测</span></h3>
+
+<p>三层抽象到 niri event 字段的映射（niri 25.11，<code>Request::EventStream</code> 实测）：</p>
+
+<table>
+  <thead><tr><th>抽象层</th><th>niri 字段</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Project</td>
+      <td><code>Workspace { id, name: Option&lt;String&gt;, idx, output, is_active, is_focused }</code></td>
+      <td><code>name = Some(...)</code> 即 project anchor。改名走 <code>WorkspacesChanged</code> 全量快照，需 diff</td>
+    </tr>
+    <tr>
+      <td>Issue（column）</td>
+      <td>由 <code>Window.layout.pos_in_scrolling_layout: [col, row]</code> 推导</td>
+      <td>niri 不暴露 column entity，按 <code>(workspace_id, col)</code> group window 即得</td>
+    </tr>
+    <tr>
+      <td>Surface（window）</td>
+      <td><code>Window { id, app_id, pid, title, workspace_id, focus_timestamp, ... }</code></td>
+      <td><strong>pid 是黄金钥匙</strong>：<code>/proc/&lt;pid&gt;/cwd</code> 反推 root → 自动认领到 project</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>关键信号：</p>
+<ul>
+  <li><code>focus_timestamp</code> 每个 window 自带（独立 <code>WindowFocusTimestampChanged</code> event）——MRU 不用我们维护，直接 read</li>
+  <li>没有 "workspace renamed" 专属 event——manager 须缓存上次 <code>WorkspacesChanged</code> 快照做 diff</li>
+  <li>启动连接时 niri 主动推一次 full snapshot（<code>WorkspacesChanged</code> + <code>WindowsChanged</code> + <code>ConfigLoaded</code>）——daemon 直接拿来 init state，不需要额外 query</li>
+</ul>
 </section>
 
 <section id="state-model">
@@ -533,6 +565,7 @@ launchers = [{ kind = "kitty" }]</code></pre>
   <li><strong>context switch</strong>：[3] ws=Active → [关 column] → ws=Dormant；下次 picker 选中 → [激活] → 不同 agent session 接管</li>
   <li><strong>agent crash</strong>：[3] → agent=Failed → user 手动重启 → 回到 [3]</li>
   <li><strong>跳过 backend</strong>：scratch issue 没有 backend，状态永远在 [2]-[5] 之间，[6]-[8] 只看 user 主动 close</li>
+  <li><strong>auto-claim（PID 反推）<span class="badge decided">3b 实测后可行</span></strong>：user 在 named workspace 里手动开 kitty 跑 <code>claude</code> → niri 推 <code>WindowOpenedOrChanged{ pid, workspace_id }</code> → daemon 查 <code>/proc/&lt;pid&gt;/cwd</code> 命中某 root.path → 直接进入 [3] agent=Running，不强求走 [1][2]。这是<em>主流入口</em>之一，不是异常路径</li>
 </ul>
 </section>
 
