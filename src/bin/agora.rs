@@ -91,6 +91,13 @@ enum RootCmd {
 }
 
 fn main() -> Result<()> {
+    // Restore default SIGPIPE handling so `agora ... | head` doesn't panic
+    // when the downstream pipe closes — standard Unix CLI behavior.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Cmd::Add {
