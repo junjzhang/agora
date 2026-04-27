@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vision — niri workspace manager</title>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --fg-soft: #4a4a4a;
+    --fg-muted: #888;
+    --bg: #fafaf8;
+    --bg-card: #ffffff;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --open: #6366f1;
+    --danger: #dc2626;
+    --border: #e5e5e3;
+    --mono: "Maple Mono NF CN", "JetBrains Mono", ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e8e6e0;
+      --fg-soft: #bfbdb6;
+      --fg-muted: #7d7a73;
+      --bg: #1a1b1e;
+      --bg-card: #22232a;
+      --accent: #7aa2f7;
+      --accent-soft: #293756;
+      --ok: #9ece6a;
+      --warn: #ff9e64;
+      --open: #bb9af7;
+      --danger: #f7768e;
+      --border: #2d2e36;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 16px; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    line-height: 1.7;
+    font-feature-settings: "cv11", "ss03";
+  }
+  .page { max-width: 880px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+  header.hero { border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; margin-bottom: 2.5rem; }
+  header.hero h1 { margin: 0 0 0.3rem; font-size: 1.9rem; font-weight: 700; letter-spacing: -0.01em; }
+  header.hero .subtitle { margin: 0 0 0.6rem; color: var(--fg-soft); font-size: 1.05rem; }
+  header.hero .meta { margin: 0; color: var(--fg-muted); font-size: 0.85rem; font-family: var(--mono); }
+  nav.toc {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem 1.4rem; margin-bottom: 2.5rem; font-size: 0.92rem;
+  }
+  nav.toc h3 { margin: 0 0 0.5rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted); font-weight: 600; }
+  nav.toc ol { margin: 0; padding-left: 1.3rem; column-count: 2; column-gap: 2rem; }
+  nav.toc li { margin: 0.15rem 0; break-inside: avoid; }
+  nav.toc a { color: var(--fg-soft); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  h2 { font-size: 1.45rem; margin: 3rem 0 0.8rem; padding-top: 1.5rem; letter-spacing: -0.01em; border-top: 1px solid var(--border); }
+  h3 { font-size: 1.08rem; margin: 1.8rem 0 0.5rem; color: var(--fg-soft); }
+  h4 { font-size: 0.98rem; margin: 1.2rem 0 0.4rem; }
+  p { margin: 0.6rem 0; }
+  code {
+    font-family: var(--mono); font-size: 0.88em; background: var(--bg-card);
+    padding: 0.1rem 0.35rem; border-radius: 4px; border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem 1.2rem; overflow-x: auto; font-family: var(--mono); font-size: 0.88rem; line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.2rem; font-size: 0.93rem; }
+  th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 600; color: var(--fg-soft); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; background: var(--bg-card); }
+  tr:last-child td { border-bottom: none; }
+  .badge {
+    display: inline-block; font-family: var(--mono); font-size: 0.72rem;
+    padding: 0.12rem 0.5rem; border-radius: 4px; text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600; vertical-align: middle; margin-right: 0.4rem;
+  }
+  .badge.decided { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .badge.open    { background: color-mix(in srgb, var(--open) 15%, transparent); color: var(--open); }
+  .badge.later   { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .badge.nongoal { background: color-mix(in srgb, var(--fg-muted) 15%, transparent); color: var(--fg-muted); }
+  .badge.obsolete { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); text-decoration: line-through; }
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--bg-card);
+    padding: 0.8rem 1.1rem; margin: 1.2rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem;
+  }
+  .callout.open { border-left-color: var(--open); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout .label {
+    font-family: var(--mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; color: var(--fg-muted); margin-bottom: 0.3rem;
+  }
+  .diagram {
+    font-family: var(--mono); font-size: 0.85rem; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem;
+    line-height: 1.5; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  .layer-map { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.6rem; margin: 1.2rem 0; }
+  .layer-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .layer-card .layer-name { font-family: var(--mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-muted); margin-bottom: 0.3rem; }
+  .layer-card .layer-title { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.4rem; }
+  .layer-card .layer-sub { font-size: 0.85rem; color: var(--fg-soft); }
+  ul, ol { padding-left: 1.3rem; }
+  li { margin: 0.25rem 0; }
+  .q {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-left: 3px solid var(--open); border-radius: 0 8px 8px 0;
+    padding: 1rem 1.2rem; margin: 1.2rem 0;
+  }
+  .q.obsoleted { border-left-color: var(--danger); opacity: 0.6; }
+  .q.decided { border-left-color: var(--ok); }
+  .q.decided .qid { background: var(--ok); }
+  .final {
+    background: color-mix(in srgb, var(--ok) 10%, transparent);
+    border-left: 3px solid var(--ok); padding: 0.6rem 0.9rem; margin-top: 0.6rem;
+    border-radius: 0 6px 6px 0; font-size: 0.92rem;
+  }
+  .final .label { font-family: var(--mono); font-size: 0.72rem; color: var(--ok); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-right: 0.5rem; }
+  .q h4 { margin: 0 0 0.4rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+  .q .qid {
+    font-family: var(--mono); font-size: 0.72rem; background: var(--open); color: white;
+    padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 700;
+  }
+  .q.obsoleted .qid { background: var(--danger); }
+  .q .qmeta { font-family: var(--mono); font-size: 0.75rem; color: var(--fg-muted); margin-bottom: 0.5rem; }
+  .options { display: grid; gap: 0.5rem; margin-top: 0.6rem; }
+  .option { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.9rem; font-size: 0.92rem; }
+  .option .opt-label { font-family: var(--mono); font-weight: 600; font-size: 0.82rem; color: var(--accent); margin-right: 0.5rem; }
+  .proposal {
+    background: color-mix(in srgb, var(--ok) 8%, transparent);
+    border-left: 3px solid var(--ok); padding: 0.5rem 0.9rem; margin-top: 0.5rem;
+    border-radius: 0 6px 6px 0; font-size: 0.9rem;
+  }
+  .proposal .label { font-family: var(--mono); font-size: 0.72rem; color: var(--ok); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-right: 0.5rem; }
+  .state-table th, .state-table td { font-size: 0.9rem; }
+  .state-table .state-name { font-family: var(--mono); font-weight: 600; color: var(--accent); }
+  .state-pill {
+    font-family: var(--mono); font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 3px;
+    font-weight: 600; display: inline-block; margin: 0 0.15rem 0.15rem 0;
+  }
+  .pill-running { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .pill-waiting-input { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .pill-waiting-perm { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+  .pill-idle { background: color-mix(in srgb, var(--fg-muted) 15%, transparent); color: var(--fg-muted); }
+  .pill-failed { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+  .pill-noagent { background: color-mix(in srgb, var(--fg-muted) 10%, transparent); color: var(--fg-muted); border: 1px dashed var(--border); }
+  footer { margin-top: 5rem; padding-top: 2rem; border-top: 1px solid var(--border); color: var(--fg-muted); font-size: 0.85rem; font-family: var(--mono); }
+  .rev-log li { font-family: var(--mono); font-size: 0.85rem; color: var(--fg-soft); }
+  .obsolete-note { color: var(--danger); font-family: var(--mono); font-size: 0.78rem; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="hero">
+  <h1>niri workspace manager</h1>
+  <p class="subtitle">agent 时代的 workspace 并行管理器（working title）</p>
+  <p class="meta">状态：iterating · 最后更新：2026-04-27 · 版本：draft-2</p>
+</header>
+
+<nav class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#why">1. Why — 我们在解决什么</a></li>
+    <li><a href="#positioning">2. 定位 &amp; 对比</a></li>
+    <li><a href="#model">3. 核心概念模型</a></li>
+    <li><a href="#niri-mapping">4. 到 niri 的映射</a></li>
+    <li><a href="#state-model">5. Issue 状态模型</a></li>
+    <li><a href="#lifecycle">6. Issue 生命周期</a></li>
+    <li><a href="#sot">7. SoT 分层 &amp; todo 抽象</a></li>
+    <li><a href="#flows">8. 核心动线</a></li>
+    <li><a href="#decided">9. 已达成的共识</a></li>
+    <li><a href="#open">10. Open Questions</a></li>
+    <li><a href="#nongoals">11. Non-goals</a></li>
+    <li><a href="#milestones">12. Milestones (粗略)</a></li>
+  </ol>
+</nav>
+
+<section id="why">
+<h2>1. Why — 我们在解决什么</h2>
+
+<p>现代工作流里，"并行" 的真实单位不是 <em>shell session</em>、不是 <em>agent session</em>、也不是 <em>worktree</em>——是 <strong>整个 project 上下文</strong>。</p>
+
+<p>一个 project 的上下文不止是代码。它同时包含：</p>
+<ul>
+  <li>IDE（VS Code / Zed，可能绑一个 git worktree）</li>
+  <li>多个 terminal（本地 shell、远程 SSH、Claude Code agent session）</li>
+  <li>浏览器 tab（API 文档、wandb、Grafana、Figma）</li>
+  <li>监控面板 / 论文 PDF / Obsidian note</li>
+  <li>可能还有视频会议、AI chat 等杂项</li>
+</ul>
+
+<p>现有工具各自只看到其中一维：</p>
+<table>
+  <thead><tr><th>工具</th><th>并行单位</th><th>看不到</th></tr></thead>
+  <tbody>
+    <tr><td>tmux / zellij</td><td>shell session</td><td>IDE、浏览器、远程</td></tr>
+    <tr><td>cmux</td><td>claude code session</td><td>terminal、IDE、辅助 app</td></tr>
+    <tr><td>conductor</td><td>git worktree</td><td>surface 多样性（只看代码面）</td></tr>
+    <tr><td>VS Code workspace picker</td><td>folder</td><td>活跃状态、agent 状态</td></tr>
+    <tr><td>niri workspace (原生)</td><td>窗口容器</td><td>project 语义、agent 状态</td></tr>
+  </tbody>
+</table>
+
+<p><strong>这个产品要补的空档：</strong>把 niri workspace 从 "窗口容器" 升级为 <em>project context 容器</em>，并绑定 <em>agent 状态层</em>。它是 cmux / conductor 的 <strong>上位抽象</strong>——它们是这层抽象的投影。</p>
+</section>
+
+<section id="positioning">
+<h2>2. 定位 &amp; 对比</h2>
+
+<p>一句话定位：</p>
+
+<div class="callout">
+  <strong>在 niri 上，把 project / issue / agent session 的编排统一成 keyboard-native 的操作，让切换、感知、创建 workspace 变成 effortless。</strong>
+</div>
+
+<p>MAET 四维度——产品的价值面：</p>
+<table>
+  <thead><tr><th>维度</th><th>含义</th><th>bash prototype 有？</th></tr></thead>
+  <tbody>
+    <tr><td><strong>M</strong>emory</td><td>记住 project，快速再打开</td><td>✅ MRU</td></tr>
+    <tr><td><strong>A</strong>wareness</td><td>每个 workspace 的 agent 在干什么（running/waiting/idle）</td><td>❌</td></tr>
+    <tr><td><strong>E</strong>nvironment</td><td>打开 project 时该起哪些 surface（launch profile）</td><td>⚠️ 硬编码</td></tr>
+    <tr><td><strong>T</strong>odos / Intent</td><td>project 当前的工作意图（issue、tasks）</td><td>❌</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="model">
+<h2>3. 核心概念模型</h2>
+
+<h3>3.1 三层抽象</h3>
+
+<p>上层是 <em>意图</em>，下层是 <em>物理</em>：</p>
+
+<div class="layer-map">
+  <div class="layer-card">
+    <div class="layer-name">Layer 1</div>
+    <h3 class="layer-title" style="margin-top:0">Project</h3>
+    <div class="layer-sub">长期持有的工作上下文。粒度待定（repo / multi-repo / topic），见 <a href="#q-project-grain">Q1</a></div>
+  </div>
+  <div class="layer-card">
+    <div class="layer-name">Layer 2</div>
+    <h3 class="layer-title" style="margin-top:0">Issue</h3>
+    <div class="layer-sub">project 内的一个具体工作单元。SoT 在外部 backend，见 <a href="#sot">§7</a></div>
+  </div>
+  <div class="layer-card">
+    <div class="layer-name">Layer 3</div>
+    <h3 class="layer-title" style="margin-top:0">Surface</h3>
+    <div class="layer-sub">具体的一个窗口（terminal / editor / browser / pdf viewer）</div>
+  </div>
+</div>
+
+<p>这个三层比 cmux / conductor 都完整：</p>
+<ul>
+  <li>cmux 只有 Layer 2 的一个切片（claude session）</li>
+  <li>conductor 是 Layer 1+2 的合并（project ≈ worktree ≈ issue）</li>
+  <li>我们是 1 / 2 / 3 全部建模，并让它们和 niri 的空间模型 1:1 对齐</li>
+</ul>
+
+<h3>3.2 Surface 的归属</h3>
+
+<p>Surface 不必属于某个 issue。归属有三种：</p>
+
+<div class="diagram">
+Project (workspace)
+  │
+  ├─ Issue 1
+  │   └─ surfaces (0..N)              ← 同 column 内 window
+  │
+  ├─ Issue 2
+  │   └─ surfaces (0..N)
+  │
+  └─ project-level surfaces (0..N)    ← 同 workspace 但不属于任何 issue
+                                        (project 根 ghostty/kitty、共享 IDE)
+
+(workspace 之外)
+  └─ floating / external              ← 谁也不属于（slack、邮件、随便看）
+                                        不在我们模型里
+</div>
+
+<p>关键点：</p>
+<ul>
+  <li><strong>Column 即 issue 的物理身份</strong>——同 column 的所有 window 都被默认判为这个 issue 的 surface。这是 niri 空间布局直接表达语义，没有独立的标注层</li>
+  <li>没有 anchor / attached 之分。column 里所有 surface 平等。issue 的生命体征 = column 是否存在</li>
+  <li>Project-level surface 是 workspace 内不属于任何 issue 的 column——比如 project 根目录的常驻 terminal</li>
+</ul>
+
+<p class="callout warn"><span class="label">技术注记</span>niri 的 column 没有稳定 id（layout 层运行时状态）。manager 内部追踪通过 "记一个 column 内任意活 window 的 id"，运行时通过 <code>window.workspace_id + window.column_index</code> 反推 column 归属。</p>
+
+<h3>3.3 Project 数据结构</h3>
+
+<p>Project 是用户心智里的稳定 entity，不是 filesystem entity。<strong>name 是 id</strong>，path 只是 root 的属性。</p>
+
+<pre><code>Project {
+  id: ProjectId,           // = name (string)，全局唯一
+  name: String,            // user 显式命名
+  roots: Vec&lt;Root&gt;,        // 所有 root 平等
+  default_root: usize,     // 索引：默认 cwd / IDE 入口
+  workspace_name: String,  // niri workspace name (默认 = name)
+  pinned: bool,
+  ts_created: u64,
+  ts_last_active: u64,
+  archived_at: Option&lt;u64&gt;,
+  backends: Vec&lt;BackendCfg&gt;,
+}
+
+Root {
+  path: String,
+  host: Option&lt;String&gt;,    // None = local；只是 root 的属性
+  label: Option&lt;String&gt;,   // "code" / "paper" / "data" / "train"
+  launchers: Vec&lt;Launcher&gt;, // 自带 (snapshot)，无 profile 引用
+}
+
+Launcher {                 // host-aware：local/remote 自动派生命令
+  VsCode | Zed
+  Kitty { run: Option&lt;String&gt; }      // run=Some("claude") 起 kitty 后跑 claude
+  Browser { url: String }
+  Custom { argv: Vec&lt;String&gt; }
+}</code></pre>
+
+<p>关键点：</p>
+<ul>
+  <li><strong>name 是 id</strong>——project 稳定 key 是用户起的名字。path 改 / repo 移 / 远程换机器都不影响 project identity。<em>special case → normal case</em></li>
+  <li><strong>所有 root 平等</strong>——没有 primary/attached 不对称。<code>default_root</code> 是 "首选项"，不是 "首要 root"</li>
+  <li><strong>Launcher 是 host-aware</strong>——同一个 <code>VsCode</code> 在 local 和 remote 自动派生不同 argv（<code>file://</code> vs <code>vscode-remote://ssh-remote%2B...</code>）</li>
+  <li><strong>Root.launchers 是自给自足的 snapshot</strong>——不引用任何 profile，root 配方完全独立</li>
+</ul>
+
+<h3>3.4 Profile：snapshot 模板，非 live binding</h3>
+
+<p>Profile 不是 root 必须订阅的 "配置"，而是 <strong>创建 root 时可选的初始化模板</strong>——一次 copy，从此解耦。</p>
+
+<pre><code># ~/.config/nwm/profiles.toml （v0.4 引入；MVP 内部硬编码）
+
+[profiles.code]
+launchers = [
+    { kind = "vscode" },
+    { kind = "kitty", run = "claude" },
+]
+
+[profiles.paper]
+launchers = [{ kind = "zed" }, { kind = "kitty" }]
+
+[profiles.data]
+launchers = [{ kind = "kitty" }]</code></pre>
+
+<p>工作流：</p>
+<ol>
+  <li><code>nwm root add memviz code ~/memviz-neo --from code</code> → copy profile <code>code</code> 到 root.launchers</li>
+  <li><code>nwm root edit memviz/code</code> → 改 root 自己的 launchers，profile 不动</li>
+  <li><code>nwm root snapshot memviz/code --as code-wandb</code> → 把当前 root 配方存为新 profile</li>
+  <li>Profile <strong>不用删除</strong>——没有 root 引用它，留着也不占事</li>
+</ol>
+
+<p>Trade-off：失去了 "改一处所有 root 一起更新" 的能力。但这是有意为之——产品哲学是 <strong>fluid</strong>，不让 user 维护一个 profile 库。改 profile 不影响存量 root。</p>
+</section>
+
+<section id="niri-mapping">
+<h2>4. 到 niri 的映射</h2>
+
+<table>
+  <thead><tr><th>抽象层</th><th>niri 物理对应</th><th>keyboard 切换</th></tr></thead>
+  <tbody>
+    <tr><td>Project</td><td>workspace（有名字）</td><td><code>Mod+O</code> picker</td></tr>
+    <tr><td>Issue</td><td><strong>column (可带 stack)</strong></td><td><code>Mod+H / L</code>（niri 横向 scroll）</td></tr>
+    <tr><td>Surface</td><td>column 内的 window</td><td><code>Mod+W</code> / <code>Mod+Up/Down</code>（niri stack 切换）</td></tr>
+  </tbody>
+</table>
+
+<p>层级示意（niri workspace "memviz-neo" 内部）：</p>
+
+<div class="diagram">
+┌─ workspace "memviz-neo" (= project) ──────────────────────────────────────┐
+│                                                                            │
+│  ┌─ column 0 ────┐  ┌─ column 1 (stacked) ─┐  ┌─ column 2 ────────────┐   │
+│  │ issue MEM-42  │  │ issue MEM-43          │  │ project-level         │   │
+│  │               │  │ ┌───────────────────┐ │  │ (不属于任何 issue)    │   │
+│  │ [Claude Code] │  │ │ [Claude Code]      │ │  │                       │   │
+│  │               │  │ ├───────────────────┤ │  │ [kitty @ project-root]│   │
+│  │               │  │ │ [VS Code]          │ │  │                       │   │
+│  │               │  │ ├───────────────────┤ │  │                       │   │
+│  │               │  │ │ [firefox wandb]    │ │  │                       │   │
+│  │               │  │ └───────────────────┘ │  │                       │   │
+│  └───────────────┘  └───────────────────────┘  └───────────────────────┘   │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+  Mod+O      → 换 project (workspace)
+  Mod+H/L    → 换 issue / project-level column   ← niri scroll 的核心价值
+  Mod+Up/Dn  → 换 surface (column 内 stack 切换)
+</div>
+</section>
+
+<section id="state-model">
+<h2>5. Issue 状态模型 <span class="badge decided">decided</span></h2>
+
+<h3>5.1 三维正交状态</h3>
+
+<p>Issue 的状态不是单一线性，而是 <strong>三个独立维度的组合</strong>。这是和 cmux / conductor / Linear 都不同的核心抽象。</p>
+
+<table class="state-table">
+  <thead><tr><th>维度</th><th>取值</th><th>SoT</th><th>状态来源 / 推导方式</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="state-name">workspace</span><br><small>物理是否存在</small></td>
+      <td>Dormant / Active</td>
+      <td>manager (runtime)</td>
+      <td>niri event stream 自动推导</td>
+    </tr>
+    <tr>
+      <td><span class="state-name">agent</span><br><small>谁在干活</small></td>
+      <td>NoAgent / Running / WaitingInput / WaitingPermission / Idle / Failed</td>
+      <td>manager (runtime)</td>
+      <td>agent hook 上报 + 进程 probe 兜底</td>
+    </tr>
+    <tr>
+      <td><span class="state-name">backend</span><br><small>逻辑工作状态</small></td>
+      <td>Backlog / InProgress / Done / Closed / None (scratch)</td>
+      <td>外部 (GH / Linear / Obsidian)</td>
+      <td>backend pull + manager 主动 close 命令</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>三维 <strong>完全正交</strong>，可以任意组合。常见组合的语义：</p>
+
+<table>
+  <thead><tr><th>workspace</th><th>agent</th><th>backend</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>Dormant</td><td>NoAgent</td><td>Backlog</td><td>立项了还没开始干</td></tr>
+    <tr><td>Active</td><td>Running</td><td>InProgress</td><td>正常工作中</td></tr>
+    <tr><td>Active</td><td>WaitingInput</td><td>InProgress</td><td>agent 在等用户回复（中等紧急）</td></tr>
+    <tr><td>Active</td><td>WaitingPermission</td><td>InProgress</td><td><strong>agent 在等授权（hard blocker，最紧急）</strong></td></tr>
+    <tr><td>Active</td><td>Idle</td><td>InProgress</td><td>column 还开着但 agent 没在干（user 手工调）</td></tr>
+    <tr><td>Dormant</td><td>NoAgent</td><td>InProgress</td><td>临时 context switch 走了，回头要回来</td></tr>
+    <tr><td>Active</td><td>NoAgent</td><td>Done</td><td>做完了，column 还没归档</td></tr>
+  </tbody>
+</table>
+
+<h3>5.2 Agent 子状态：Waiting 拆两档</h3>
+
+<p>"agent 在等" 这件事有两种本质不同的语义。混在一起会丢掉关键信息：</p>
+
+<table>
+  <thead><tr><th>状态</th><th>语义</th><th>来源（Claude Code）</th><th>UI 紧急度</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="state-pill pill-waiting-input">WaitingInput</span></td>
+      <td>agent 主动提问，等用户回复（"你想要 X 还是 Y"）</td>
+      <td><code>Notification</code> hook</td>
+      <td>🟡 中。可以 conversational 慢慢回</td>
+    </tr>
+    <tr>
+      <td><span class="state-pill pill-waiting-perm">WaitingPermission</span></td>
+      <td>agent 要执行 risky 操作，等授权（"要不要 rm 这个文件"）</td>
+      <td><code>PreToolUse</code> 拦截 (decision=ask)</td>
+      <td>🔴 高。<strong>hard blocker</strong>，打断流程</td>
+    </tr>
+    <tr><td><span class="state-pill pill-running">Running</span></td><td>正常执行中</td><td>process active</td><td>🟢 无需关注</td></tr>
+    <tr><td><span class="state-pill pill-idle">Idle</span></td><td>agent 进程还在但没活动</td><td>process active + N秒无 I/O</td><td>⚪ 无需关注</td></tr>
+    <tr><td><span class="state-pill pill-failed">Failed</span></td><td>agent 进程异常退出</td><td>exit code != 0</td><td>🔴 失败提示</td></tr>
+    <tr><td><span class="state-pill pill-noagent">NoAgent</span></td><td>没有 agent 在为这个 issue 工作</td><td>—</td><td>⚪ 无需关注</td></tr>
+  </tbody>
+</table>
+
+<p>产品层面区别巨大：<strong>WaitingPermission 是 hard blocker</strong>——agent 完全不能动直到用户决定。DMS bar 用红色高亮 + 桌面 notification。<strong>WaitingInput</strong> 是 soft blocker——黄色提示就够。</p>
+
+<h3>5.3 状态推导规则</h3>
+
+<p><strong>Workspace state 完全隐式推导：</strong></p>
+
+<div class="callout">
+  <strong>ws=Active ⟺ issue 在 niri 里有 column（不论哪个 workspace、可见不可见）</strong><br>
+  <strong>ws=Dormant ⟺ issue 没有 column，但 manager 还持有它的 record</strong>
+</div>
+
+<p>用户从不需要显式 <code>pause</code> / <code>resume</code>。manager 订阅 niri <code>WindowOpened</code> / <code>WindowClosed</code> 自动推导。</p>
+
+<p>注意：<strong>ws state（物理）</strong>和 <strong>issue record 留存（逻辑）</strong>是两件事——</p>
+<ul>
+  <li>ws state 由 niri 状态自动推导</li>
+  <li>issue record 是否在 manager 表里活着，由 backend 状态 + 用户主动归档控制</li>
+</ul>
+
+<p>它们正交。一个 issue 可以是 <code>ws=Dormant + record=alive</code>（暂存，picker 里能再开），或 <code>ws=Dormant + record=archived</code>（不在 picker 里露面）。</p>
+</section>
+
+<section id="lifecycle">
+<h2>6. Issue 生命周期</h2>
+
+<p>典型轨迹（不强制顺序，issue 可在任意状态间往复）：</p>
+
+<div class="diagram">
+[1] 创建                 ws=Dormant   agent=NoAgent       backend=Backlog
+       │  user: nwm issue start MEM-42  /  obsidian 里建了个 note
+       ▼
+[2] 激活                 ws=Active    agent=NoAgent       backend=InProgress
+       │  manager 在当前 workspace 开 column，但还没起 agent
+       ▼
+[3] agent 接管           ws=Active    agent=Running       backend=InProgress
+       │  column 里起 claude code session，绑 issue
+       ▼
+[4] 等用户输入           ws=Active    agent=WaitingInput  backend=InProgress
+       │  ↕  user 回复后 → 回 Running，往返若干次
+       │
+[4'] 等用户授权          ws=Active    agent=WaitingPermission  backend=InProgress
+       │  ↕  user 批准/拒绝后 → 回 Running
+       ▼
+[5] 闲置                 ws=Active    agent=Idle          backend=InProgress
+       │  user 离开但 column 还开着
+       ▼
+[6] 完工                 ws=Active    agent=NoAgent       backend=Done
+       │  user/agent: nwm issue close
+       │  → backend.close() → backend=Closed → record 标 archived
+       ▼
+[7] 归档                 ws=Dormant   agent=NoAgent       backend=Closed
+       │  manager 不强制关 column；user 自己关 window 后 ws→Dormant
+       │  archived record 保留 TTL 期（默认 30 天）后才删除
+       ▼
+[8] (可选) 删除          record 从 manager 移除（backend record 留着）
+</div>
+
+<p>非典型轨迹示例：</p>
+<ul>
+  <li><strong>context switch</strong>：[3] ws=Active → [关 column] → ws=Dormant；下次 picker 选中 → [激活] → 不同 agent session 接管</li>
+  <li><strong>agent crash</strong>：[3] → agent=Failed → user 手动重启 → 回到 [3]</li>
+  <li><strong>跳过 backend</strong>：scratch issue 没有 backend，状态永远在 [2]-[5] 之间，[6]-[8] 只看 user 主动 close</li>
+</ul>
+</section>
+
+<section id="sot">
+<h2>7. SoT 分层 &amp; todo 抽象</h2>
+
+<p>核心原则：<strong>我们不是 todo 产品。我们是 workspace 产品。</strong>todo 的 source of truth 在外部，我们是 <em>surface</em>——绑定、展示、提供快捷动作。</p>
+
+<h3>7.1 SoT 归属表</h3>
+<table>
+  <thead><tr><th>数据</th><th>SoT 在哪</th><th>我们的角色</th></tr></thead>
+  <tbody>
+    <tr><td>Workspace / project 注册表 (MRU)</td><td>我们 (<code>state.json</code>)</td><td>owner</td></tr>
+    <tr><td>Issue 内容 / 状态机</td><td>外部（GH / Linear / Obsidian）</td><td>read-only surface + close/status 动作</td></tr>
+    <tr><td>Issue ws / agent 实时状态</td><td>manager (runtime)</td><td>owner（来自推导）</td></tr>
+    <tr><td>Workspace ↔ Issue 绑定关系</td><td>manager</td><td>owner</td></tr>
+    <tr><td>Workspace ↔ Agent 绑定关系</td><td>manager (runtime)</td><td>owner</td></tr>
+  </tbody>
+</table>
+
+<h3>7.2 Todo 抽象层</h3>
+
+<p>不绑死具体 backend。定义一个内部 trait：</p>
+
+<pre><code>trait IssueBackend {
+    fn list(&amp;self, filter: Filter) -&gt; Vec&lt;Issue&gt;;
+    fn get(&amp;self, id: IssueId) -&gt; Option&lt;Issue&gt;;
+    fn close(&amp;self, id: IssueId) -&gt; Result&lt;()&gt;;
+    fn set_status(&amp;self, id: IssueId, status: Status) -&gt; Result&lt;()&gt;;
+}
+
+// 实现：
+//   GithubBackend    (gh CLI)
+//   LinearBackend    (GraphQL / OAuth)
+//   ObsidianBackend  (vault markdown + frontmatter)</code></pre>
+
+<p>一个 project 可以配置 0..n 个 backend（大多是 1 个）。MVP 不做任何 backend；v0.3 先做 Obsidian 或 GH（看 <a href="#q-backend-priority">Q2</a>）。</p>
+
+<h3>7.3 集成边界（我们做什么 / 不做什么）</h3>
+<ul>
+  <li>✅ <strong>Bind</strong>：workspace / column 绑定一个 issue id</li>
+  <li>✅ <strong>Read</strong>：显示 title、status、description、link 到原处</li>
+  <li>✅ <strong>Inject</strong>：打开 issue 时把 description 注入 agent context</li>
+  <li>✅ <strong>Close / 转状态</strong>：agent 完成后一键 close</li>
+  <li>✅ <strong>Auto-archive</strong>：backend 进入 Closed → record 立刻标 archived（不再出现在默认 picker）。保留 TTL（默认 30 天）允许 unarchive；TTL 过后真正删除</li>
+  <li>❌ <strong>Create / Edit issue</strong>：在 backend 原生 UI 做</li>
+  <li>❌ <strong>Comment</strong>：同上</li>
+  <li>❌ <strong>强制关物理 column</strong>：archive 不动 niri，agent 可能还要清理输出，user 自己决定何时关</li>
+</ul>
+</section>
+
+<section id="flows">
+<h2>8. 核心动线</h2>
+
+<h3>8.0 Project &amp; Root 管理</h3>
+<pre><code>nwm add ~/memviz-neo                          # 创建 project，name 默认 = basename
+nwm add ~/memviz-neo --name memviz             # 显式命名
+nwm add . --name memviz                        # cwd 简写
+
+nwm root add memviz paper ~/memviz-paper       # 给 project 加 root
+nwm root add memviz train gpu:/home/jovyan/... # 远程 root
+nwm root add memviz data ~/data/memviz --from data  # 从 profile 初始化
+nwm root edit memviz/code                      # 编辑 root.launchers
+nwm root snapshot memviz/code --as code-wandb  # 把 root.launchers 存为新 profile
+
+nwm rename memviz memviz-cv                    # 改 project name (atomic)
+nwm root rm memviz/data                        # 移除 root</code></pre>
+
+<h3>8.1 "我要回到某个 project"</h3>
+<pre><code>Mod+O → 模糊匹配 "memviz" → Enter
+  → manager 检查 workspace "memviz" 存在吗？
+      是 → 切过去（focus-workspace）
+      否 → 找一个空 workspace，set-workspace-name
+  → 默认 launch roots[default_root].launchers（fluid + 最小打扰）
+
+nwm open memviz --root paper      → 在同一 workspace 多开一个 column 装 paper root
+nwm open memviz --all             → 一次性铺所有 root（每个 root 一个 column）</code></pre>
+
+<h3>8.2 "我要在这个 project 里开一个新 issue"</h3>
+<pre><code>project workspace 里按 Mod+Shift+N (或 nwm issue new)
+  → manager 在当前 workspace 新开一个 column
+  → 起 claude code terminal (cwd=project path, 绑 issue id)
+  → 弹 picker 选 issue：
+      · 从 backend 拉 "分配给我" 的 open issue 列表
+      · 或选 "scratch" (无 backend issue)
+  → 选中后 column 绑定 issue，agent 收到 issue description 作为 prompt</code></pre>
+
+<h3>8.3 "这个 project 里的 agent 在等我吗？"</h3>
+<pre><code>DMS bar / sidebar 常驻显示：
+  🔴 memviz-neo   [MEM-42 · WaitingPermission] ← agent 等授权
+  🟡 ml-paper     [#128  · WaitingInput]
+  🟢 viz-core     [running]
+  ⚪ scratch      [unlinked, idle]
+点击某个 → 切到它的 workspace，column 已经聚焦到 waiting 的 issue</code></pre>
+
+<h3>8.4 "issue 做完了"</h3>
+<pre><code>在 issue column 里 Mod+Shift+X (或 nwm issue close)
+  → manager 调 backend.close(issue_id)
+  → record 立刻标 archived（picker 默认不见）
+  → niri column 不动，user 自己决定何时关
+  → TTL (30天) 内可以 unarchive；之后真删</code></pre>
+
+<h3>8.5 "我要丢一个 project / 归档"</h3>
+<pre><code>Mod+O picker → 选中 project → 右键 / context menu → archive
+  → workspace 解绑，MRU 标 archived（默认不出现在 picker）</code></pre>
+</section>
+
+<section id="decided">
+<h2>9. 已达成的共识 <span class="badge decided">decided</span></h2>
+
+<ol>
+  <li>并行的基本单位是 <strong>workspace</strong>（不是 agent session / 不是 shell）</li>
+  <li>我们是 <strong>surface</strong>，不做 issue 的 SoT</li>
+  <li>三层抽象：<strong>Project → Issue → Surface</strong></li>
+  <li>Niri 空间对应：<strong>workspace → column (可 stacked) → window</strong></li>
+  <li><strong>Anchor 概念删除</strong>。column 即 issue 的物理身份，column 内 surface 平等</li>
+  <li>Issue 状态是 <strong>三维正交</strong>：<code>workspace × agent × backend</code></li>
+  <li>Agent state <strong>把 Waiting 拆成两档</strong>：<code>WaitingInput</code> (soft blocker) / <code>WaitingPermission</code> (hard blocker)</li>
+  <li>Workspace state <strong>完全隐式</strong>由 niri 推导，无显式 pause/resume</li>
+  <li>Issue active 期间 <strong>最多 1 个 agent session</strong>（dormant 后可换不同 session 重新激活）</li>
+  <li><strong>Auto-archive on backend close</strong>：record 立刻标 archived，保留 TTL 期允许 unarchive</li>
+  <li>Archive <strong>不强制关物理 column</strong>，niri 状态由用户控制</li>
+  <li>Todo backend 是一个 <strong>抽象层</strong>，不绑死 GH / Linear / Obsidian</li>
+  <li>DMS plugin 走 "调 CLI 子进程" 方案，未来可选升级到 unix socket</li>
+  <li>MVP <em>不触碰</em> issue / agent 层，只做 bash prototype 能力的 Rust 化</li>
+  <li><strong>Project name 是 id</strong>（显式命名，全局唯一）；path 是 root 的属性。重命名 path 不影响 project identity</li>
+  <li>Project 内 <strong>所有 root 平等</strong>，<code>default_root</code> 索引指 "首选项" 而非 "首要 root"。primary/attached 不对称概念删除</li>
+  <li>Multi-root 是一等公民（用户工作流 multi-root 场景频繁）。Root 包含 local 与 remote，host 只是 root 元数据，不参与 project 划分</li>
+  <li><strong>Launcher 是 host-aware</strong>，自动派生 local/remote 命令。MVP 内置 <code>VsCode / Zed / Kitty / Browser / Custom</code></li>
+  <li><strong>Profile 是 snapshot 模板，非 live binding</strong>。root 配方自给自足，profile 仅在创建时被 copy；改 profile 不影响存量 root；profile 不需删除</li>
+  <li><code>nwm open</code> 默认只 launch <code>default_root</code>，<code>--root &lt;label&gt;</code> / <code>--all</code> 显式扩展</li>
+</ol>
+</section>
+
+<section id="open">
+<h2>10. Open Questions <span class="badge open">open</span></h2>
+
+<div class="q decided" id="q-project-grain">
+  <h4><span class="qid">Q1</span> Project 的粒度 <span class="badge decided">decided</span></h4>
+  <div class="qmeta">状态：decided 2026-04-27 · 收敛进 §3.3 数据结构</div>
+  <p>原讨论：4 个候选 (A repo / B folder / C topic / D 折中)。基于用户工作流 data point："multi-root 场景挺多，远程本地无所谓"，选定 <strong>D 的强化版</strong>：</p>
+  <div class="final"><span class="label">final</span>
+    <ul style="margin:0.3rem 0 0;">
+      <li><strong>name 是 id</strong>（显式命名，全局唯一），path 仅是 root 属性</li>
+      <li>一个 project 装 <code>Vec&lt;Root&gt;</code>，所有 root 平等</li>
+      <li><code>default_root</code> 是 "首选项"，不是 "主"——primary/attached 不对称概念删除</li>
+      <li>Root 含 local 与 remote，host 不影响 project 划分</li>
+      <li>重命名 path 不影响 project identity；用 <code>nwm rename</code> 改 name (atomic)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="q" id="q-backend-priority">
+  <h4><span class="qid">Q2</span> Issue backend 优先级</h4>
+  <div class="qmeta">状态：open · 影响：v0.3 排期</div>
+  <p>用户用 Github 最多、喜欢 Linear、想用 Obsidian。先做哪个？</p>
+  <div class="options">
+    <div class="option"><span class="opt-label">A. Obsidian 先</span>本地 markdown，无 auth，agent 最好做。但要求用户接受 frontmatter schema</div>
+    <div class="option"><span class="opt-label">B. Github 先</span>用户主力，<code>gh</code> CLI 已认证。issue 风格更偏任务，研究工作流不一定吻合</div>
+    <div class="option"><span class="opt-label">C. Linear 先</span>结构化最好（状态机、cycle）。需要 OAuth，实现成本最高</div>
+  </div>
+  <div class="proposal"><span class="label">current proposal</span>A → B → C。Obsidian 实现最便宜、和 agent 最契合、local-first 符合产品气质</div>
+</div>
+
+<div class="q obsoleted" id="q-anchor">
+  <h4><span class="qid">Q3</span> <s>Issue ↔ Agent session 的绑定语义（anchor 死 = session 死？）</s></h4>
+  <div class="qmeta">状态：<span class="obsolete-note">obsoleted by 2026-04-27</span> · 已并入 §5 状态模型</div>
+  <p><span class="obsolete-note">原问题的前提（必须有 anchor window）已在新模型中废除。column 即 issue 物理身份，没有 "心跳 window" 概念。issue 的 ws=Active/Dormant 由 column 是否存在自动推导，agent session 绑定到 session id 而非 window。</span></p>
+</div>
+
+<div class="q" id="q-issue-in-obsidian">
+  <h4><span class="qid">Q4</span> Obsidian 里 issue 是什么形态</h4>
+  <div class="qmeta">状态：open · 影响：ObsidianBackend 实现</div>
+  <div class="options">
+    <div class="option"><span class="opt-label">A. 独立 note</span>每个 issue 一个 <code>.md</code> 文件，frontmatter 带 status/project/workspace。可寻址、agent 易操作</div>
+    <div class="option"><span class="opt-label">B. inline task</span>散在各处的 <code>- [ ] ...</code>，用 Tasks plugin 语法</div>
+    <div class="option"><span class="opt-label">C. Bases table</span>用 Obsidian 1.6+ 的 Bases 做结构化 issue 表</div>
+  </div>
+  <div class="proposal"><span class="label">current proposal</span>A（独立 note）。B 适合 Todoist 级任务，不适合我们 "workspace-bindable entity" 的需求</div>
+</div>
+
+<div class="q decided" id="q-workspace-create">
+  <h4><span class="qid">Q5</span> 新 project 的冷启动 / launch profile <span class="badge decided">decided</span></h4>
+  <div class="qmeta">状态：decided 2026-04-27 · 收敛进 §3.4 profile 模型 + §8.0/8.1 动线</div>
+  <p>原讨论：硬编码 / repo 内 <code>.nwm.toml</code> / global 模板。基于用户哲学："profile 用完即弃、动态、不考虑删除" → 选 <strong>snapshot 模板模型</strong>：</p>
+  <div class="final"><span class="label">final</span>
+    <ul style="margin:0.3rem 0 0;">
+      <li><strong>Launcher 绑在 root</strong>（不绑 project / 不绑 issue），因为不同 root 类型差异大</li>
+      <li><strong>Profile 是 snapshot 模板，非 live binding</strong>：root 创建时可 <code>--from &lt;profile&gt;</code> copy 一份；从此和 profile 解耦</li>
+      <li><code>nwm root edit</code> 改的是 root 自带 launchers；<code>nwm root snapshot --as</code> 把 root 提升为新 profile</li>
+      <li>Profile 不需删除——没引用关系，留着无成本</li>
+      <li><strong>Launcher host-aware</strong>：同一 <code>VsCode</code> 在 local/remote 自动派生命令</li>
+      <li><code>nwm open</code> 默认只 launch <code>default_root</code>，<code>--root</code>/<code>--all</code> 显式扩</li>
+      <li>MVP 内置硬编码 system profiles (<code>code/paper/data</code>)，v0.4 引入 <code>~/.config/nwm/profiles.toml</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="q" id="q-agent-awareness">
+  <h4><span class="qid">Q6</span> Agent awareness 机制</h4>
+  <div class="qmeta">状态：open · 影响：v0.2 实现</div>
+  <div class="options">
+    <div class="option"><span class="opt-label">A. 进程 probe</span>扫 <code>/proc</code>，看 window 里有没有 claude/codex 进程。零侵入但状态粗</div>
+    <div class="option"><span class="opt-label">B. Hook 上报</span>Claude Code hook 写 <code>~/.local/state/nwm/sessions/*.json</code>。精确，每种 agent 要单独适配</div>
+    <div class="option"><span class="opt-label">C. A + B 兜底</span>能 hook 就 hook，不能就 probe 降级</div>
+  </div>
+  <div class="proposal"><span class="label">current proposal</span>C。Claude Code 先做 hook（SessionStart / Stop / Notification / PreToolUse），其他 agent 靠 probe</div>
+</div>
+
+<div class="q" id="q-archive-ttl">
+  <h4><span class="qid">Q7</span> Archive TTL &amp; 可配置性</h4>
+  <div class="qmeta">状态：open · 影响：8.4 / 7.3 集成边界</div>
+  <p>Auto-archive on backend close 后保留多久才真删？</p>
+  <div class="options">
+    <div class="option"><span class="opt-label">A. 默认 30 天，不可配</span>简单。30 天足够 "我点错关了" 的回滚窗口</div>
+    <div class="option"><span class="opt-label">B. 默认 30 天，全局可配</span><code>~/.config/nwm/config.toml</code> 里改</div>
+    <div class="option"><span class="opt-label">C. 默认 30 天，per-project 可配</span>project 私有 archive 政策（research 类长期保留，scratch 短期）</div>
+  </div>
+  <div class="proposal"><span class="label">current proposal</span>B（默认 30 天，全局可配）。C 过度设计，project 级差异不够大</div>
+</div>
+</section>
+
+<section id="nongoals">
+<h2>11. Non-goals <span class="badge nongoal">not doing</span></h2>
+<ul>
+  <li>不做 <strong>todo app</strong>。我们不存 todo 内容，更不管 deadline / reminder / notification。那是 Todoist / 滴答清单的事</li>
+  <li>不做 <strong>issue 创建 / 评论</strong>。只做绑定、读取、关闭 / 状态转换</li>
+  <li>不做 <strong>GUI 界面</strong>。所有 UI 由 DMS plugin（首选）/ vicinae / walker 提供，我们只提供 CLI + socket API</li>
+  <li>不做 <strong>多 compositor 支持</strong>。只做 niri。hyprland 等别的 compositor 不在考虑范围，因为 column + scroll 模型是核心设计假设</li>
+  <li>不做 <strong>远程/分布式同步</strong>。state 是 local file + systemd user daemon</li>
+  <li>不做 <strong>团队协作</strong>。single-user 工具。团队协作交给 Linear / Github</li>
+  <li>不做 <strong>显式 pause/resume issue</strong>。ws state 完全隐式由 niri 推导</li>
+  <li>不做 <strong>强制关闭 column</strong>。archive 是逻辑动作，物理布局由 user 控制</li>
+</ul>
+</section>
+
+<section id="milestones">
+<h2>12. Milestones (粗略) <span class="badge later">draft</span></h2>
+
+<table>
+  <thead><tr><th>版本</th><th>目标</th><th>交付</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>v0.1</strong><br>MVP / bash 迁移</td>
+      <td>把 bash prototype 能力同构迁到 Rust，零新功能，能回滚</td>
+      <td>
+        <ul>
+          <li><code>nwmd</code> daemon（niri event 订阅、state 管理、socket）</li>
+          <li><code>nwm add/list/forget/open/status</code> CLI</li>
+          <li>DMS plugin 改调 <code>nwm list --json</code></li>
+          <li>data model 预留 issue / agent 层字段（不实现，留空）</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><strong>v0.2</strong><br>Awareness</td>
+      <td>每个 workspace / column 显示 agent 状态（含 WaitingPermission 高亮）</td>
+      <td>
+        <ul>
+          <li>Claude Code hook (SessionStart / Stop / Notification / PreToolUse)</li>
+          <li>进程 probe fallback</li>
+          <li>DMS bar live badge（区分 hard / soft blocker）</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><strong>v0.3</strong><br>Issue binding</td>
+      <td>workspace ↔ issue 绑定，Obsidian 先落地</td>
+      <td>
+        <ul>
+          <li>ObsidianBackend（读 vault markdown + frontmatter）</li>
+          <li><code>nwm issue new/list/open/close/link</code></li>
+          <li>打开 issue 时 inject description 到 agent</li>
+          <li>auto-archive on close + TTL 清理</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><strong>v0.4</strong><br>Environment profile</td>
+      <td>按 project 启动不同 surface 组合</td>
+      <td>
+        <ul>
+          <li><code>.nwm.toml</code> repo 内 profile</li>
+          <li>global 模板 + override</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><strong>v0.5</strong><br>Github / Linear</td>
+      <td>扩展 issue backend</td>
+      <td>
+        <ul>
+          <li>GithubBackend (<code>gh</code> CLI)</li>
+          <li>LinearBackend (OAuth)</li>
+        </ul>
+      </td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<footer>
+  <p><strong>修订历史</strong></p>
+  <ul class="rev-log">
+    <li>2026-04-24 draft-0 · 初版。基于 bash prototype + 对话讨论形成 vision。留 6 个 open questions 待迭代</li>
+    <li>2026-04-27 draft-1 · 删除 anchor 概念；新增 §5 三维状态模型 / §6 lifecycle；agent state 拆 WaitingInput/WaitingPermission；Q3 obsoleted；新增 Q7 archive TTL；已定共识扩到 14 条</li>
+    <li>2026-04-27 draft-2 · 收敛 Q1 (project 粒度) + Q5 (launch profile)；新增 §3.3 数据结构 / §3.4 snapshot profile 模型 / §8.0 root 管理动线；name-as-id + multi-root 平等 + fluid profile；已定共识扩到 20 条</li>
+  </ul>
+  <p style="margin-top:2rem">文件：<code>~/projects/niri-workspace/VISION.html</code></p>
+</footer>
+
+</div>
+</body>
+</html>

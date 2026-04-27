@@ -1,0 +1,28 @@
+[package]
+name = "nwm"
+version = "0.1.0-dev"
+edition = "2021"
+description = "agent-era niri workspace manager"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "nwm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nwmd"
+path = "src/bin/nwmd.rs"
+
+[[bin]]
+name = "nwm"
+path = "src/bin/nwm.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

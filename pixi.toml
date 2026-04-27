@@ -1,0 +1,22 @@
+[workspace]
+name = "nwm"
+version = "0.1.0-dev"
+description = "agent-era niri workspace manager"
+authors = ["junjie zhang <junj.jay.zhang@gmail.com>"]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+rust = ">=1.83,<2"
+
+[tasks]
+build         = "cargo build"
+build-release = "cargo build --release"
+test          = "cargo test"
+fmt           = "cargo fmt"
+fmt-check     = "cargo fmt --check"
+lint          = "cargo clippy --all-targets -- -D warnings"
+check         = { depends-on = ["fmt-check", "lint", "test"] }
+nwmd          = "cargo run --bin nwmd --"
+nwm           = "cargo run --bin nwm --"
+install       = "cargo install --path . --bins --locked"
