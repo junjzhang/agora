@@ -1,12 +1,12 @@
-//! nwm — niri workspace manager CLI
+//! agora — niri workspace manager CLI
 //!
-//! Thin client to nwmd. See VISION.html §8 for the command surface.
+//! Thin client to agorad. See VISION.html §8 for the command surface.
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "nwm",
+    name = "agora",
     version,
     about = "agent-era niri workspace manager",
     long_about = None,
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(c) => println!("{:?}: TODO", std::any::type_name_of_val(&c)),
-        None => println!("nwm v{} — run with --help", env!("CARGO_PKG_VERSION")),
+        None => println!("agora v{} — run with --help", env!("CARGO_PKG_VERSION")),
     }
     Ok(())
 }

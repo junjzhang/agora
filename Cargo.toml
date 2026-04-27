@@ -1,5 +1,5 @@
 [package]
-name = "nwm"
+name = "agora"
 version = "0.1.0-dev"
 edition = "2021"
 description = "agent-era niri workspace manager"
@@ -7,16 +7,16 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
-name = "nwm"
+name = "agora"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nwmd"
-path = "src/bin/nwmd.rs"
+name = "agorad"
+path = "src/bin/agorad.rs"
 
 [[bin]]
-name = "nwm"
-path = "src/bin/nwm.rs"
+name = "agora"
+path = "src/bin/agora.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

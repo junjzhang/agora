@@ -1,4 +1,4 @@
-//! nwmd — niri workspace manager daemon
+//! agorad — niri workspace manager daemon
 //!
 //! Subscribes to niri events, manages project state, exposes a unix socket.
 //! See VISION.html §12 milestones.
@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    tracing::info!("nwmd v{} (stub)", env!("CARGO_PKG_VERSION"));
+    tracing::info!("agorad v{} (stub)", env!("CARGO_PKG_VERSION"));
     tracing::warn!("not implemented yet");
     Ok(())
 }
