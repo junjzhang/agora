@@ -548,10 +548,13 @@ fn kitty_command(host: Option<&str>, path: &str, run: Option<&str>) -> Command {
         None => {
             c.arg("--directory").arg(path);
             if let Some(r) = run {
+                // Use the user's interactive zsh so .zshrc is sourced — the daemon
+                // runs as a systemd user service whose PATH lacks ~/.local/bin etc.
+                // After `r` exits, drop into a fresh interactive zsh.
                 c.arg("--")
-                    .arg("sh")
-                    .arg("-lc")
-                    .arg(format!("{r}; exec $SHELL"));
+                    .arg("zsh")
+                    .arg("-ic")
+                    .arg(format!("{r}; exec zsh"));
             }
         }
     }
