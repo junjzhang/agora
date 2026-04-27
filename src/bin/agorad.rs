@@ -139,6 +139,16 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         }
         Request::Open { name } => open(state, name),
         Request::Status => Ok(status(state)),
+        Request::Forget { name } => Ok(Payload::Project(forget(state, name)?)),
+        Request::Rename { from, to } => rename(state, from, to),
+        Request::RootAdd {
+            project,
+            path,
+            label,
+            launchers,
+        } => Ok(Payload::Project(root_add(
+            state, project, path, label, launchers,
+        )?)),
     }
 }
 
@@ -195,6 +205,116 @@ fn rematch_claims(inner: &mut Inner) {
             .as_deref()
             .and_then(|c| match_project(c, &inner.projects));
     }
+}
+
+fn forget(state: &State, name: String) -> Result<Project> {
+    let mut inner = state.lock().unwrap();
+    let idx = inner
+        .projects
+        .iter()
+        .position(|p| p.id == name)
+        .ok_or_else(|| anyhow::anyhow!("no project named '{name}'"))?;
+    let removed = inner.projects.remove(idx);
+    store::save(&inner.projects).context("save project store")?;
+    rematch_claims(&mut inner);
+    Ok(removed)
+}
+
+fn rename(state: &State, from: String, to: String) -> Result<Payload> {
+    if from == to {
+        bail!("'from' and 'to' are the same");
+    }
+    if to.is_empty() {
+        bail!("new project name must not be empty");
+    }
+
+    let old_workspace_name = {
+        let inner = state.lock().unwrap();
+        if inner.projects.iter().any(|p| p.id == to) {
+            bail!("project '{to}' already exists");
+        }
+        let p = inner
+            .projects
+            .iter()
+            .find(|p| p.id == from)
+            .ok_or_else(|| anyhow::anyhow!("no project named '{from}'"))?;
+        p.workspace_name.clone()
+    };
+
+    let workspaces = match niri_call(NiriRequest::Workspaces)? {
+        NiriResponse::Workspaces(ws) => ws,
+        other => bail!("unexpected niri response to Workspaces: {other:?}"),
+    };
+    let niri_ws_renamed = workspaces
+        .iter()
+        .any(|w| w.name.as_deref() == Some(old_workspace_name.as_str()));
+
+    if niri_ws_renamed {
+        let action = NiriAction::SetWorkspaceName {
+            name: to.clone(),
+            workspace: Some(WorkspaceReferenceArg::Name(old_workspace_name.clone())),
+        };
+        match niri_call(NiriRequest::Action(action))? {
+            NiriResponse::Handled => {}
+            other => bail!("unexpected niri response to Action: {other:?}"),
+        }
+    }
+
+    let mut inner = state.lock().unwrap();
+    let p = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == from)
+        .ok_or_else(|| anyhow::anyhow!("project '{from}' disappeared during rename"))?;
+    p.id = to.clone();
+    p.name = to.clone();
+    if p.workspace_name == from {
+        p.workspace_name = to.clone();
+    }
+    p.ts_last_active = unix_now();
+    let project = p.clone();
+    store::save(&inner.projects).context("save project store")?;
+    rematch_claims(&mut inner);
+
+    Ok(Payload::Renamed {
+        project,
+        niri_ws_renamed,
+    })
+}
+
+fn root_add(
+    state: &State,
+    project: String,
+    path: String,
+    label: Option<String>,
+    launchers: Vec<Launcher>,
+) -> Result<Project> {
+    let resolved = fs::canonicalize(&path).with_context(|| format!("resolve root path {path}"))?;
+    let meta = fs::metadata(&resolved).with_context(|| format!("stat {}", resolved.display()))?;
+    if !meta.is_dir() {
+        bail!("root path is not a directory: {}", resolved.display());
+    }
+    let path_str = resolved.to_string_lossy().into_owned();
+
+    let mut inner = state.lock().unwrap();
+    let p = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project)
+        .ok_or_else(|| anyhow::anyhow!("no project named '{project}'"))?;
+    if p.roots.iter().any(|r| r.path == path_str) {
+        bail!("project '{project}' already has a root at {path_str}");
+    }
+    p.roots.push(Root {
+        path: path_str,
+        host: None,
+        label,
+        launchers,
+    });
+    let cloned = p.clone();
+    store::save(&inner.projects).context("save project store")?;
+    rematch_claims(&mut inner);
+    Ok(cloned)
 }
 
 fn open(state: &State, name: String) -> Result<Payload> {

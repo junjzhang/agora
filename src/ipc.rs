@@ -32,6 +32,20 @@ pub enum Request {
         name: String,
     },
     Status,
+    Forget {
+        name: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    RootAdd {
+        project: String,
+        path: String,
+        label: Option<String>,
+        #[serde(default)]
+        launchers: Vec<Launcher>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +66,11 @@ pub enum Payload {
     Status {
         project_count: usize,
         windows: Vec<WindowSummary>,
+    },
+    Renamed {
+        project: Project,
+        /// True if a niri workspace carrying the old name was renamed in lock-step.
+        niri_ws_renamed: bool,
     },
 }
 

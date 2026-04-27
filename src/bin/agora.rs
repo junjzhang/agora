@@ -48,6 +48,42 @@ enum Cmd {
     },
     /// Show daemon state — projects + currently-claimed windows
     Status,
+    /// Remove a project from the manager (does not touch its niri workspace)
+    Forget {
+        /// Project name
+        name: String,
+    },
+    /// Rename a project; also renames the matching niri workspace if present
+    Rename {
+        /// Current project name
+        from: String,
+        /// New project name
+        to: String,
+    },
+    /// Manage roots within a project
+    Root {
+        #[command(subcommand)]
+        action: RootCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RootCmd {
+    /// Add another root directory to an existing project
+    Add {
+        /// Project name
+        project: String,
+        /// Root directory
+        path: String,
+        /// Optional label for this root (e.g. "code", "paper", "data")
+        #[arg(long)]
+        label: Option<String>,
+        /// Add a launcher tied to this root. May be repeated.
+        ///
+        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD`
+        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
+        launchers: Vec<Launcher>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -108,6 +144,67 @@ fn main() -> Result<()> {
                 );
             } else {
                 println!("focused workspace '{}'", project.workspace_name);
+            }
+        }
+        Cmd::Forget { name } => {
+            let payload = call(Request::Forget { name })?;
+            let Payload::Project(p) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            println!("forgot: {} (was rooted at {})", p.id, p.roots[0].path);
+        }
+        Cmd::Rename { from, to } => {
+            let payload = call(Request::Rename {
+                from: from.clone(),
+                to,
+            })?;
+            let Payload::Renamed {
+                project,
+                niri_ws_renamed,
+            } = payload
+            else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            if niri_ws_renamed {
+                println!(
+                    "renamed: {} -> {} (niri workspace also renamed)",
+                    from, project.id
+                );
+            } else {
+                println!("renamed: {} -> {}", from, project.id);
+            }
+        }
+        Cmd::Root {
+            action:
+                RootCmd::Add {
+                    project,
+                    path,
+                    label,
+                    launchers,
+                },
+        } => {
+            let payload = call(Request::RootAdd {
+                project,
+                path,
+                label,
+                launchers,
+            })?;
+            let Payload::Project(p) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            let added = p.roots.last().expect("RootAdd must produce a root");
+            let label = added.label.as_deref().unwrap_or("-");
+            let kinds: Vec<&'static str> = added.launchers.iter().map(|l| l.kind()).collect();
+            if kinds.is_empty() {
+                println!("root added: {} <- {} (label={})", p.id, added.path, label);
+            } else {
+                println!(
+                    "root added: {} <- {} (label={}, launchers: {})",
+                    p.id,
+                    added.path,
+                    label,
+                    kinds.join(", "),
+                );
             }
         }
         Cmd::Status => {
