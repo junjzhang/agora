@@ -40,7 +40,11 @@ enum Cmd {
         launchers: Vec<Launcher>,
     },
     /// List all projects
-    List,
+    List {
+        /// Emit JSON (one Project per array element) instead of the human table
+        #[arg(long)]
+        json: bool,
+    },
     /// Focus the project's niri workspace; claim the current workspace if not yet named
     Open {
         /// Project name
@@ -114,12 +118,18 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::List => {
+        Cmd::List { json } => {
             let payload = call(Request::List)?;
-            let Payload::Projects(projects) = payload else {
+            let Payload::Projects(mut projects) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            if projects.is_empty() {
+            // MRU order: most recently active first.
+            projects.sort_by(|a, b| b.ts_last_active.cmp(&a.ts_last_active));
+            if json {
+                serde_json::to_writer(std::io::stdout(), &projects)
+                    .context("serialize projects")?;
+                println!();
+            } else if projects.is_empty() {
                 println!("(no projects)");
             } else {
                 for p in projects {
