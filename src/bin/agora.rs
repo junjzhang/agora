@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use agora::ipc::{self, Payload, Request, Response};
+use agora::model::Launcher;
 
 #[derive(Parser)]
 #[command(
@@ -32,6 +33,11 @@ enum Cmd {
         /// Root directory
         #[arg(default_value = ".")]
         path: String,
+        /// Add a launcher to spawn on `agora open`. May be repeated.
+        ///
+        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD`
+        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
+        launchers: Vec<Launcher>,
     },
     /// List all projects
     List,
@@ -47,15 +53,30 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Cmd::Add { name, path } => {
+        Cmd::Add {
+            name,
+            path,
+            launchers,
+        } => {
             let payload = call(Request::Add {
                 name,
                 root_path: path,
+                launchers,
             })?;
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            println!("added: {} -> {}", p.id, p.roots[0].path);
+            let kinds: Vec<&'static str> = p.roots[0].launchers.iter().map(|l| l.kind()).collect();
+            if kinds.is_empty() {
+                println!("added: {} -> {}", p.id, p.roots[0].path);
+            } else {
+                println!(
+                    "added: {} -> {} (launchers: {})",
+                    p.id,
+                    p.roots[0].path,
+                    kinds.join(", "),
+                );
+            }
         }
         Cmd::List => {
             let payload = call(Request::List)?;
@@ -124,6 +145,25 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_launcher(s: &str) -> Result<Launcher, String> {
+    match s {
+        "vscode" => Ok(Launcher::Vscode),
+        "zed" => Ok(Launcher::Zed),
+        "kitty" => Ok(Launcher::Kitty { run: None }),
+        other => {
+            if let Some(cmd) = other.strip_prefix("kitty:") {
+                Ok(Launcher::Kitty {
+                    run: Some(cmd.to_string()),
+                })
+            } else {
+                Err(format!(
+                    "unknown launcher '{other}' (expected: vscode|zed|kitty|kitty:CMD)"
+                ))
+            }
+        }
+    }
 }
 
 fn call(req: Request) -> Result<Payload> {

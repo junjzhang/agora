@@ -48,3 +48,15 @@ pub enum Launcher {
         argv: Vec<String>,
     },
 }
+
+impl Launcher {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Launcher::Vscode => "vscode",
+            Launcher::Zed => "zed",
+            Launcher::Kitty { .. } => "kitty",
+            Launcher::Browser { .. } => "browser",
+            Launcher::Custom { .. } => "custom",
+        }
+    }
+}

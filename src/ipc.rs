@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::Project;
+use crate::model::{Launcher, Project};
 
 pub fn socket_path() -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
@@ -21,9 +21,16 @@ pub fn socket_path() -> Result<PathBuf> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    Add { name: String, root_path: String },
+    Add {
+        name: String,
+        root_path: String,
+        #[serde(default)]
+        launchers: Vec<Launcher>,
+    },
     List,
-    Open { name: String },
+    Open {
+        name: String,
+    },
     Status,
 }
 

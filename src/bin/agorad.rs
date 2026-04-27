@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -19,7 +20,7 @@ use niri_ipc::{
 };
 
 use agora::ipc::{self, Payload, Request, Response, WindowSummary};
-use agora::model::{Project, Root};
+use agora::model::{Launcher, Project, Root};
 use agora::store;
 
 #[derive(Default)]
@@ -127,7 +128,11 @@ fn handle_client(stream: UnixStream, state: State) -> Result<()> {
 
 fn dispatch(req: Request, state: &State) -> Result<Payload> {
     match req {
-        Request::Add { name, root_path } => Ok(Payload::Project(add(state, name, root_path)?)),
+        Request::Add {
+            name,
+            root_path,
+            launchers,
+        } => Ok(Payload::Project(add(state, name, root_path, launchers)?)),
         Request::List => {
             let projects = state.lock().unwrap().projects.clone();
             Ok(Payload::Projects(projects))
@@ -137,7 +142,12 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
     }
 }
 
-fn add(state: &State, name: String, root_path: String) -> Result<Project> {
+fn add(
+    state: &State,
+    name: String,
+    root_path: String,
+    launchers: Vec<Launcher>,
+) -> Result<Project> {
     if name.is_empty() {
         bail!("project name must not be empty");
     }
@@ -164,7 +174,7 @@ fn add(state: &State, name: String, root_path: String) -> Result<Project> {
             path,
             host: None,
             label: None,
-            launchers: Vec::new(),
+            launchers,
         }],
         default_root: 0,
         pinned: false,
@@ -222,6 +232,10 @@ fn open(state: &State, name: String) -> Result<Payload> {
         other => bail!("unexpected niri response to Action: {other:?}"),
     }
 
+    if !exists {
+        spawn_launchers(&project);
+    }
+
     {
         let mut inner = state.lock().unwrap();
         if let Some(p) = inner.projects.iter_mut().find(|p| p.id == name) {
@@ -234,6 +248,87 @@ fn open(state: &State, name: String) -> Result<Payload> {
         project,
         claimed_current: !exists,
     })
+}
+
+fn spawn_launchers(project: &Project) {
+    let Some(root) = project.roots.get(project.default_root) else {
+        tracing::warn!(project = %project.id, "default_root index out of range");
+        return;
+    };
+    if root.host.is_some() {
+        tracing::warn!(project = %project.id, "remote launcher not yet supported");
+        return;
+    }
+    if root.launchers.is_empty() {
+        return;
+    }
+    for launcher in &root.launchers {
+        spawn_one(launcher, &root.path);
+    }
+}
+
+fn spawn_one(launcher: &Launcher, cwd: &str) {
+    let mut cmd = launcher_command(launcher, cwd);
+    cmd.current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match cmd.spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            tracing::info!(
+                kind = launcher.kind(),
+                pid,
+                cwd = %cwd,
+                "spawned launcher",
+            );
+            // Reap when the child exits so it doesn't linger as a zombie.
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = launcher.kind(),
+                error = %e,
+                "spawn failed",
+            );
+        }
+    }
+}
+
+fn launcher_command(launcher: &Launcher, cwd: &str) -> Command {
+    match launcher {
+        Launcher::Vscode => {
+            let mut c = Command::new("code");
+            c.arg(cwd);
+            c
+        }
+        Launcher::Zed => {
+            let mut c = Command::new("zed");
+            c.arg(cwd);
+            c
+        }
+        Launcher::Kitty { run: None } => Command::new("kitty"),
+        Launcher::Kitty { run: Some(run) } => {
+            let mut c = Command::new("kitty");
+            c.arg("--").arg("sh").arg("-lc").arg(run);
+            c
+        }
+        Launcher::Browser { url } => {
+            let mut c = Command::new("xdg-open");
+            c.arg(url);
+            c
+        }
+        Launcher::Custom { argv } => {
+            let mut iter = argv.iter();
+            let head = iter.next().map(String::as_str).unwrap_or("true");
+            let mut c = Command::new(head);
+            c.args(iter);
+            c
+        }
+    }
 }
 
 fn status(state: &State) -> Payload {
