@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action as NiriAction, Event, Reply, Request as NiriRequest, Response as NiriResponse, Window,
-    WorkspaceReferenceArg,
+    Workspace, WorkspaceReferenceArg,
 };
 
 use agora::ipc::{self, Payload, Request, Response, WindowSummary};
@@ -335,42 +335,96 @@ fn open(state: &State, name: String) -> Result<Payload> {
         NiriResponse::Workspaces(ws) => ws,
         other => bail!("unexpected niri response to Workspaces: {other:?}"),
     };
-    let exists = workspaces
+
+    // Existing project workspace? Just focus it.
+    if workspaces
         .iter()
-        .any(|w| w.name.as_deref() == Some(project.workspace_name.as_str()));
-
-    let action = if exists {
-        NiriAction::FocusWorkspace {
+        .any(|w| w.name.as_deref() == Some(project.workspace_name.as_str()))
+    {
+        let action = NiriAction::FocusWorkspace {
             reference: WorkspaceReferenceArg::Name(project.workspace_name.clone()),
+        };
+        match niri_call(NiriRequest::Action(action))? {
+            NiriResponse::Handled => {}
+            other => bail!("unexpected niri response to Action: {other:?}"),
         }
-    } else {
-        NiriAction::SetWorkspaceName {
-            name: project.workspace_name.clone(),
-            workspace: None,
-        }
-    };
 
+        bump_last_active(state, &name)?;
+        return Ok(Payload::Opened {
+            project,
+            claimed_current: false,
+        });
+    }
+
+    // Need to claim a fresh workspace. niri keeps a trailing empty unnamed
+    // workspace at the bottom of every output — that's our new-workspace slot.
+    let target = pick_target_workspace(&workspaces)?;
+
+    // Move focus to it (no-op if we're already there).
+    let focused_id = workspaces.iter().find(|w| w.is_focused).map(|w| w.id);
+    if Some(target.id) != focused_id {
+        let action = NiriAction::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Id(target.id),
+        };
+        match niri_call(NiriRequest::Action(action))? {
+            NiriResponse::Handled => {}
+            other => bail!("unexpected niri response to FocusWorkspace: {other:?}"),
+        }
+    }
+
+    // Name the now-focused workspace.
+    let action = NiriAction::SetWorkspaceName {
+        name: project.workspace_name.clone(),
+        workspace: None,
+    };
     match niri_call(NiriRequest::Action(action))? {
         NiriResponse::Handled => {}
-        other => bail!("unexpected niri response to Action: {other:?}"),
+        other => bail!("unexpected niri response to SetWorkspaceName: {other:?}"),
     }
 
-    if !exists {
-        spawn_launchers(&project);
-    }
-
-    {
-        let mut inner = state.lock().unwrap();
-        if let Some(p) = inner.projects.iter_mut().find(|p| p.id == name) {
-            p.ts_last_active = unix_now();
-        }
-        store::save(&inner.projects).context("save project store")?;
-    }
+    spawn_launchers(&project);
+    bump_last_active(state, &name)?;
 
     Ok(Payload::Opened {
         project,
-        claimed_current: !exists,
+        claimed_current: true,
     })
+}
+
+/// Pick the workspace to claim for a new project: prefer the focused workspace
+/// if it is itself empty + unnamed; otherwise the bottom-most empty unnamed one
+/// on the focused output (niri's auto-managed trailing slot).
+fn pick_target_workspace(workspaces: &[Workspace]) -> Result<&Workspace> {
+    let focused = workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .ok_or_else(|| anyhow::anyhow!("niri reports no focused workspace"))?;
+
+    if focused.name.is_none() && focused.active_window_id.is_none() {
+        return Ok(focused);
+    }
+
+    workspaces
+        .iter()
+        .filter(|w| {
+            w.output == focused.output && w.name.is_none() && w.active_window_id.is_none()
+        })
+        .max_by_key(|w| w.idx)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no empty unnamed workspace on output {:?}; \
+                 niri usually keeps a trailing empty one — check `niri msg workspaces`",
+                focused.output
+            )
+        })
+}
+
+fn bump_last_active(state: &State, name: &str) -> Result<()> {
+    let mut inner = state.lock().unwrap();
+    if let Some(p) = inner.projects.iter_mut().find(|p| p.id == name) {
+        p.ts_last_active = unix_now();
+    }
+    store::save(&inner.projects).context("save project store")
 }
 
 fn spawn_launchers(project: &Project) {
