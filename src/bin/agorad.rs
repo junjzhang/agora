@@ -27,6 +27,8 @@ use agora::store;
 struct Inner {
     projects: Vec<Project>,
     claims: HashMap<u64, Claim>,
+    /// niri workspace id → current name (None if unnamed). Driven by WorkspacesChanged.
+    workspaces: HashMap<u64, Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,7 @@ fn main() -> Result<()> {
     let state: State = Arc::new(Mutex::new(Inner {
         projects,
         claims: HashMap::new(),
+        workspaces: HashMap::new(),
     }));
 
     {
@@ -510,6 +513,10 @@ fn run_niri_loop(state: State) -> Result<()> {
 
 fn apply_event(state: &State, event: Event) {
     match event {
+        Event::WorkspacesChanged { workspaces } => {
+            let mut inner = state.lock().unwrap();
+            inner.workspaces = workspaces.iter().map(|w| (w.id, w.name.clone())).collect();
+        }
         Event::WindowsChanged { windows } => {
             // Full snapshot — replace claims.
             let projects = state.lock().unwrap().projects.clone();
@@ -522,19 +529,78 @@ fn apply_event(state: &State, event: Event) {
             tracing::info!(count = windows.len(), "claims rebuilt from snapshot");
         }
         Event::WindowOpenedOrChanged { window } => {
+            let prev_workspace = state
+                .lock()
+                .unwrap()
+                .claims
+                .get(&window.id)
+                .and_then(|c| c.workspace_id);
             let projects = state.lock().unwrap().projects.clone();
             let claim = build_claim(&window, &projects);
             let project = claim.project.clone();
+            let new_workspace = claim.workspace_id;
             state.lock().unwrap().claims.insert(window.id, claim);
             if let Some(p) = project {
                 tracing::info!(window_id = window.id, project = %p, app_id = ?window.app_id, "window claimed");
             }
+            // If the window moved to a different workspace, the old one might be empty now.
+            if let Some(old) = prev_workspace {
+                if Some(old) != new_workspace {
+                    cleanup_workspace_if_empty(state, old);
+                }
+            }
         }
         Event::WindowClosed { id } => {
-            state.lock().unwrap().claims.remove(&id);
+            let prev_workspace = state
+                .lock()
+                .unwrap()
+                .claims
+                .remove(&id)
+                .and_then(|c| c.workspace_id);
+            if let Some(ws_id) = prev_workspace {
+                cleanup_workspace_if_empty(state, ws_id);
+            }
         }
         _ => {
-            // Ignore for MVP; later: workspace name diffs, focus tracking, etc.
+            // Ignore for MVP; later: focus tracking, urgency, etc.
+        }
+    }
+}
+
+/// If `ws_id` carries a project workspace_name and now has zero claims, ask niri
+/// to unset its name. Frees the anchor for reuse and keeps niri tidy.
+fn cleanup_workspace_if_empty(state: &State, ws_id: u64) {
+    let name = {
+        let inner = state.lock().unwrap();
+        let Some(Some(name)) = inner.workspaces.get(&ws_id).cloned() else {
+            return;
+        };
+        let is_project_ws = inner.projects.iter().any(|p| p.workspace_name == name);
+        if !is_project_ws {
+            return;
+        }
+        let still_has_claims = inner
+            .claims
+            .values()
+            .any(|c| c.workspace_id == Some(ws_id));
+        if still_has_claims {
+            return;
+        }
+        name
+    };
+
+    let action = NiriAction::UnsetWorkspaceName {
+        reference: Some(WorkspaceReferenceArg::Name(name.clone())),
+    };
+    match niri_call(NiriRequest::Action(action)) {
+        Ok(NiriResponse::Handled) => {
+            tracing::info!(workspace = %name, "unset name on empty project workspace");
+        }
+        Ok(other) => {
+            tracing::warn!(workspace = %name, response = ?other, "unexpected niri response to UnsetWorkspaceName");
+        }
+        Err(e) => {
+            tracing::warn!(workspace = %name, error = %e, "UnsetWorkspaceName failed");
         }
     }
 }
