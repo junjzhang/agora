@@ -35,6 +35,13 @@ enum Cmd {
     },
     /// List all projects
     List,
+    /// Focus the project's niri workspace; claim the current workspace if not yet named
+    Open {
+        /// Project name
+        name: String,
+    },
+    /// Show daemon state — projects + currently-claimed windows
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -61,6 +68,57 @@ fn main() -> Result<()> {
                 for p in projects {
                     let path = p.roots.first().map(|r| r.path.as_str()).unwrap_or("?");
                     println!("{}\t{}", p.id, path);
+                }
+            }
+        }
+        Cmd::Open { name } => {
+            let payload = call(Request::Open { name })?;
+            let Payload::Opened {
+                project,
+                claimed_current,
+            } = payload
+            else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            if claimed_current {
+                println!(
+                    "claimed current workspace as '{}' ({})",
+                    project.workspace_name, project.id
+                );
+            } else {
+                println!("focused workspace '{}'", project.workspace_name);
+            }
+        }
+        Cmd::Status => {
+            let payload = call(Request::Status)?;
+            let Payload::Status {
+                project_count,
+                windows,
+            } = payload
+            else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            println!("projects: {project_count}");
+            if windows.is_empty() {
+                println!("windows: (none)");
+            } else {
+                println!("windows: {}", windows.len());
+                for w in windows {
+                    let project = w.project.as_deref().unwrap_or("-");
+                    let app = w.app_id.as_deref().unwrap_or("?");
+                    let ws = w
+                        .workspace_id
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    let col = w
+                        .column
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    let title = w.title.as_deref().unwrap_or("");
+                    println!(
+                        "  [{}] ws={} col={} app={} project={} \"{}\"",
+                        w.window_id, ws, col, app, project, title
+                    );
                 }
             }
         }

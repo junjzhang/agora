@@ -1,24 +1,45 @@
 //! agorad — niri workspace manager daemon
 //!
 //! - Main thread: serves the agora unix socket (CLI requests).
-//! - Background thread: subscribes to niri events (best-effort; logs only in MVP).
+//! - Background thread: subscribes to niri events; tracks window→project claims.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 use niri_ipc::socket::Socket;
-use niri_ipc::{Event, Reply, Request as NiriRequest, Response as NiriResponse};
+use niri_ipc::{
+    Action as NiriAction, Event, Reply, Request as NiriRequest, Response as NiriResponse, Window,
+    WorkspaceReferenceArg,
+};
 
-use agora::ipc::{self, Payload, Request, Response};
+use agora::ipc::{self, Payload, Request, Response, WindowSummary};
 use agora::model::{Project, Root};
 use agora::store;
 
-type State = Arc<Mutex<Vec<Project>>>;
+#[derive(Default)]
+struct Inner {
+    projects: Vec<Project>,
+    claims: HashMap<u64, Claim>,
+}
+
+#[derive(Debug, Clone)]
+struct Claim {
+    project: Option<String>,
+    app_id: Option<String>,
+    title: Option<String>,
+    workspace_id: Option<u64>,
+    column: Option<usize>,
+    pid: Option<i32>,
+    cwd: Option<PathBuf>,
+}
+
+type State = Arc<Mutex<Inner>>;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -35,16 +56,22 @@ fn main() -> Result<()> {
         path = %store::store_path()?.display(),
         "loaded projects",
     );
-    let state: State = Arc::new(Mutex::new(projects));
+    let state: State = Arc::new(Mutex::new(Inner {
+        projects,
+        claims: HashMap::new(),
+    }));
 
-    std::thread::Builder::new()
-        .name("niri-events".into())
-        .spawn(|| {
-            if let Err(e) = run_niri_loop() {
-                tracing::error!(error = %e, "niri event loop ended");
-            }
-        })
-        .context("spawn niri-events thread")?;
+    {
+        let state = state.clone();
+        std::thread::Builder::new()
+            .name("niri-events".into())
+            .spawn(move || {
+                if let Err(e) = run_niri_loop(state) {
+                    tracing::error!(error = %e, "niri event loop ended");
+                }
+            })
+            .context("spawn niri-events thread")?;
+    }
 
     let path = ipc::socket_path()?;
     let listener = bind_socket(&path)?;
@@ -102,9 +129,11 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
     match req {
         Request::Add { name, root_path } => Ok(Payload::Project(add(state, name, root_path)?)),
         Request::List => {
-            let projects = state.lock().unwrap().clone();
+            let projects = state.lock().unwrap().projects.clone();
             Ok(Payload::Projects(projects))
         }
+        Request::Open { name } => open(state, name),
+        Request::Status => Ok(status(state)),
     }
 }
 
@@ -121,8 +150,8 @@ fn add(state: &State, name: String, root_path: String) -> Result<Project> {
     }
     let path = resolved.to_string_lossy().into_owned();
 
-    let mut projects = state.lock().unwrap();
-    if projects.iter().any(|p| p.id == name) {
+    let mut inner = state.lock().unwrap();
+    if inner.projects.iter().any(|p| p.id == name) {
         bail!("project '{name}' already exists");
     }
 
@@ -143,9 +172,97 @@ fn add(state: &State, name: String, root_path: String) -> Result<Project> {
         ts_last_active: now,
         archived_at: None,
     };
-    projects.push(project.clone());
-    store::save(&projects).context("save project store")?;
+    inner.projects.push(project.clone());
+    store::save(&inner.projects).context("save project store")?;
+    rematch_claims(&mut inner);
     Ok(project)
+}
+
+fn rematch_claims(inner: &mut Inner) {
+    for claim in inner.claims.values_mut() {
+        claim.project = claim
+            .cwd
+            .as_deref()
+            .and_then(|c| match_project(c, &inner.projects));
+    }
+}
+
+fn open(state: &State, name: String) -> Result<Payload> {
+    let project = {
+        let inner = state.lock().unwrap();
+        inner
+            .projects
+            .iter()
+            .find(|p| p.id == name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no project named '{name}'"))?
+    };
+
+    let workspaces = match niri_call(NiriRequest::Workspaces)? {
+        NiriResponse::Workspaces(ws) => ws,
+        other => bail!("unexpected niri response to Workspaces: {other:?}"),
+    };
+    let exists = workspaces
+        .iter()
+        .any(|w| w.name.as_deref() == Some(project.workspace_name.as_str()));
+
+    let action = if exists {
+        NiriAction::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Name(project.workspace_name.clone()),
+        }
+    } else {
+        NiriAction::SetWorkspaceName {
+            name: project.workspace_name.clone(),
+            workspace: None,
+        }
+    };
+
+    match niri_call(NiriRequest::Action(action))? {
+        NiriResponse::Handled => {}
+        other => bail!("unexpected niri response to Action: {other:?}"),
+    }
+
+    {
+        let mut inner = state.lock().unwrap();
+        if let Some(p) = inner.projects.iter_mut().find(|p| p.id == name) {
+            p.ts_last_active = unix_now();
+        }
+        store::save(&inner.projects).context("save project store")?;
+    }
+
+    Ok(Payload::Opened {
+        project,
+        claimed_current: !exists,
+    })
+}
+
+fn status(state: &State) -> Payload {
+    let inner = state.lock().unwrap();
+    let mut windows: Vec<WindowSummary> = inner
+        .claims
+        .iter()
+        .map(|(id, c)| WindowSummary {
+            window_id: *id,
+            project: c.project.clone(),
+            app_id: c.app_id.clone(),
+            title: c.title.clone(),
+            workspace_id: c.workspace_id,
+            column: c.column,
+            pid: c.pid,
+            cwd: c.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        })
+        .collect();
+    windows.sort_by_key(|w| (w.workspace_id, w.column, w.window_id));
+    Payload::Status {
+        project_count: inner.projects.len(),
+        windows,
+    }
+}
+
+fn niri_call(req: NiriRequest) -> Result<NiriResponse> {
+    let mut socket = Socket::connect().context("connect to niri socket")?;
+    let reply: Reply = socket.send(req).context("send request to niri")?;
+    reply.map_err(|msg| anyhow::anyhow!("niri error: {msg}"))
 }
 
 fn unix_now() -> u64 {
@@ -155,7 +272,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn run_niri_loop() -> Result<()> {
+fn run_niri_loop(state: State) -> Result<()> {
     let mut socket = Socket::connect().context("connecting to niri IPC socket")?;
     let reply: Reply = socket
         .send(NiriRequest::EventStream)
@@ -172,13 +289,74 @@ fn run_niri_loop() -> Result<()> {
 
     loop {
         let event = read_event().context("reading niri event")?;
-        log_niri_event(&event);
+        apply_event(&state, event);
     }
 }
 
-fn log_niri_event(event: &Event) {
-    match serde_json::to_string(event) {
-        Ok(json) => tracing::info!(target: "niri", "{json}"),
-        Err(e) => tracing::warn!(target: "niri", error = %e, "serialize failed"),
+fn apply_event(state: &State, event: Event) {
+    match event {
+        Event::WindowsChanged { windows } => {
+            // Full snapshot — replace claims.
+            let projects = state.lock().unwrap().projects.clone();
+            let mut new_claims: HashMap<u64, Claim> = HashMap::with_capacity(windows.len());
+            for w in &windows {
+                new_claims.insert(w.id, build_claim(w, &projects));
+            }
+            let mut inner = state.lock().unwrap();
+            inner.claims = new_claims;
+            tracing::info!(count = windows.len(), "claims rebuilt from snapshot");
+        }
+        Event::WindowOpenedOrChanged { window } => {
+            let projects = state.lock().unwrap().projects.clone();
+            let claim = build_claim(&window, &projects);
+            let project = claim.project.clone();
+            state.lock().unwrap().claims.insert(window.id, claim);
+            if let Some(p) = project {
+                tracing::info!(window_id = window.id, project = %p, app_id = ?window.app_id, "window claimed");
+            }
+        }
+        Event::WindowClosed { id } => {
+            state.lock().unwrap().claims.remove(&id);
+        }
+        _ => {
+            // Ignore for MVP; later: workspace name diffs, focus tracking, etc.
+        }
     }
+}
+
+fn build_claim(w: &Window, projects: &[Project]) -> Claim {
+    let cwd = w.pid.and_then(read_proc_cwd);
+    let project = cwd.as_deref().and_then(|c| match_project(c, projects));
+    Claim {
+        project,
+        app_id: w.app_id.clone(),
+        title: w.title.clone(),
+        workspace_id: w.workspace_id,
+        column: w.layout.pos_in_scrolling_layout.map(|(c, _)| c),
+        pid: w.pid,
+        cwd,
+    }
+}
+
+fn read_proc_cwd(pid: i32) -> Option<PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+    fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+fn match_project(cwd: &Path, projects: &[Project]) -> Option<String> {
+    let mut best: Option<(usize, &Project)> = None;
+    for p in projects {
+        for r in &p.roots {
+            let root = Path::new(&r.path);
+            if cwd.starts_with(root) {
+                let len = root.as_os_str().len();
+                if best.is_none_or(|(l, _)| len > l) {
+                    best = Some((len, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p.id.clone())
 }

@@ -23,6 +23,8 @@ pub fn socket_path() -> Result<PathBuf> {
 pub enum Request {
     Add { name: String, root_path: String },
     List,
+    Open { name: String },
+    Status,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,28 @@ pub enum Response {
 pub enum Payload {
     Project(Project),
     Projects(Vec<Project>),
+    Opened {
+        project: Project,
+        /// True if we just named the focused workspace (vs. focusing one that already had the name).
+        claimed_current: bool,
+    },
+    Status {
+        project_count: usize,
+        windows: Vec<WindowSummary>,
+    },
+}
+
+/// One window's view as the daemon sees it. Sent in `Status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSummary {
+    pub window_id: u64,
+    pub project: Option<String>,
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub workspace_id: Option<u64>,
+    pub column: Option<usize>,
+    pub pid: Option<i32>,
+    pub cwd: Option<String>,
 }
 
 impl Response {
