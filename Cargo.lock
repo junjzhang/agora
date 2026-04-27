@@ -8,6 +8,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
+ "niri-ipc",
  "serde",
  "serde_json",
  "tokio",
@@ -223,6 +224,15 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "niri-ipc"
+version = "25.11.0"
+source = "git+https://github.com/YaLTeR/niri.git?rev=4d214891#4d214891017fa7b893df1140d24f76defba0eb88"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

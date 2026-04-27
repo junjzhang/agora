@@ -26,3 +26,8 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# niri-ipc is not semver-stable: variants get added in patch bumps.
+# Pin to the exact niri-git rev installed locally (niri 25.11-157-g4d214891).
+# Bump this rev when niri-git updates.
+niri-ipc = { git = "https://github.com/YaLTeR/niri.git", rev = "4d214891" }
