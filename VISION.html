@@ -429,6 +429,15 @@ launchers = [{ kind = "kitty" }]</code></pre>
   <li>没有 "workspace renamed" 专属 event——manager 须缓存上次 <code>WorkspacesChanged</code> 快照做 diff</li>
   <li>启动连接时 niri 主动推一次 full snapshot（<code>WorkspacesChanged</code> + <code>WindowsChanged</code> + <code>ConfigLoaded</code>）——daemon 直接拿来 init state，不需要额外 query</li>
 </ul>
+
+<p class="callout warn"><span class="label">PID 自动认领的盲点 <span class="badge later">v2 修</span></span>
+<code>Window.pid</code> 给的是<em>启动 Wayland 连接的进程</em>。launcher / app menu 起的 GUI（kitty / vscode / chrome）pid 的 <code>/proc/&lt;pid&gt;/cwd</code> 是 launcher 的 cwd（多半是 <code>$HOME</code>），不会随用户在 terminal 里 <code>cd</code>、或 vscode "Open Folder" 而更新。所以纯 cwd-prefix 匹配只对<strong>由 manager 自己 spawn、或 CLI 显式带 cwd 启动</strong>的进程有效。
+</p>
+<p>v2 把这个盲点补上的两条路：</p>
+<ul>
+  <li><strong>进程树递归</strong>：<code>/proc/&lt;pid&gt;/task/&lt;pid&gt;/children</code> 走到最深的 leaf，取那里的 cwd——能搞定 terminal 里 cd 的场景</li>
+  <li><strong>App-specific hooks</strong>：kitty OSC 7 上报子 shell cwd / vscode workspace 文件解析 / Claude Code session 的 cwd——精准但每个 app 单独适配</li>
+</ul>
 </section>
 
 <section id="state-model">
