@@ -432,22 +432,24 @@ fn spawn_launchers(project: &Project) {
         tracing::warn!(project = %project.id, "default_root index out of range");
         return;
     };
-    if root.host.is_some() {
-        tracing::warn!(project = %project.id, "remote launcher not yet supported");
-        return;
-    }
     if root.launchers.is_empty() {
         return;
     }
     for launcher in &root.launchers {
-        spawn_one(launcher, &root.path);
+        spawn_one(launcher, root);
     }
 }
 
-fn spawn_one(launcher: &Launcher, cwd: &str) {
-    let mut cmd = launcher_command(launcher, cwd);
-    cmd.current_dir(cwd)
-        .stdin(Stdio::null())
+fn spawn_one(launcher: &Launcher, root: &Root) {
+    let Some(mut cmd) = launcher_command(launcher, root) else {
+        return; // a warn was already logged
+    };
+    // For local roots, set cwd so the spawned process inherits it.
+    // For remote roots, root.path is the remote path; we never chdir locally.
+    if root.host.is_none() {
+        cmd.current_dir(&root.path);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match cmd.spawn() {
@@ -456,10 +458,10 @@ fn spawn_one(launcher: &Launcher, cwd: &str) {
             tracing::info!(
                 kind = launcher.kind(),
                 pid,
-                cwd = %cwd,
+                host = root.host.as_deref().unwrap_or("local"),
+                path = %root.path,
                 "spawned launcher",
             );
-            // Reap when the child exits so it doesn't linger as a zombie.
             std::thread::spawn(move || {
                 let mut child = child;
                 let _ = child.wait();
@@ -475,37 +477,91 @@ fn spawn_one(launcher: &Launcher, cwd: &str) {
     }
 }
 
-fn launcher_command(launcher: &Launcher, cwd: &str) -> Command {
+fn launcher_command(launcher: &Launcher, root: &Root) -> Option<Command> {
+    let host = root.host.as_deref();
+    let path = root.path.as_str();
     match launcher {
         Launcher::Vscode => {
             let mut c = Command::new("code");
-            c.arg(cwd);
-            c
+            match host {
+                Some(h) => {
+                    c.arg("--folder-uri")
+                        .arg(format!("vscode-remote://ssh-remote+{h}{path}"));
+                }
+                None => {
+                    c.arg(path);
+                }
+            }
+            Some(c)
         }
         Launcher::Zed => {
+            if host.is_some() {
+                tracing::warn!(
+                    host = host.unwrap_or(""),
+                    "zed remote not supported; skipping"
+                );
+                return None;
+            }
             let mut c = Command::new("zed");
-            c.arg(cwd);
-            c
+            c.arg(path);
+            Some(c)
         }
-        Launcher::Kitty { run: None } => Command::new("kitty"),
-        Launcher::Kitty { run: Some(run) } => {
-            let mut c = Command::new("kitty");
-            c.arg("--").arg("sh").arg("-lc").arg(run);
-            c
-        }
+        Launcher::Kitty { run } => Some(kitty_command(host, path, run.as_deref())),
+        Launcher::Claude => Some(kitty_command(host, path, Some("claude"))),
+        Launcher::Codex => Some(kitty_command(host, path, Some("codex"))),
         Launcher::Browser { url } => {
             let mut c = Command::new("xdg-open");
             c.arg(url);
-            c
+            Some(c)
         }
         Launcher::Custom { argv } => {
             let mut iter = argv.iter();
             let head = iter.next().map(String::as_str).unwrap_or("true");
             let mut c = Command::new(head);
             c.args(iter);
-            c
+            Some(c)
         }
     }
+}
+
+/// Build a `kitty` command for opening a terminal at `path`, optionally running
+/// `run` first. For remote roots we wrap with the kitty ssh kitten, mirroring
+/// the user's shell helper `sshp` (kitten ssh -R 7897:127.0.0.1:7890).
+fn kitty_command(host: Option<&str>, path: &str, run: Option<&str>) -> Command {
+    let mut c = Command::new("kitty");
+    match host {
+        Some(h) => {
+            // sshp-equivalent: forward Clash proxy port to remote.
+            const SSHP_PORT_FORWARD: &str = "7897:127.0.0.1:7890";
+            let remote_cmd = match run {
+                Some(r) => format!("cd {}; {}; exec $SHELL", shell_quote(path), r),
+                None => format!("cd {}; exec $SHELL", shell_quote(path)),
+            };
+            c.arg("+kitten")
+                .arg("ssh")
+                .arg("-R")
+                .arg(SSHP_PORT_FORWARD)
+                .arg(h)
+                .arg("-t")
+                .arg(remote_cmd);
+        }
+        None => {
+            c.arg("--directory").arg(path);
+            if let Some(r) = run {
+                c.arg("--")
+                    .arg("sh")
+                    .arg("-lc")
+                    .arg(format!("{r}; exec $SHELL"));
+            }
+        }
+    }
+    c
+}
+
+/// Single-quote a path for safe inclusion in a remote shell command.
+fn shell_quote(s: &str) -> String {
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn status(state: &State) -> Payload {

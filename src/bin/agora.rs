@@ -266,6 +266,8 @@ fn parse_launcher(s: &str) -> Result<Launcher, String> {
         "vscode" => Ok(Launcher::Vscode),
         "zed" => Ok(Launcher::Zed),
         "kitty" => Ok(Launcher::Kitty { run: None }),
+        "claude" => Ok(Launcher::Claude),
+        "codex" => Ok(Launcher::Codex),
         other => {
             if let Some(cmd) = other.strip_prefix("kitty:") {
                 Ok(Launcher::Kitty {
@@ -273,7 +275,8 @@ fn parse_launcher(s: &str) -> Result<Launcher, String> {
                 })
             } else {
                 Err(format!(
-                    "unknown launcher '{other}' (expected: vscode|zed|kitty|kitty:CMD)"
+                    "unknown launcher '{other}' \
+                     (expected: vscode|zed|kitty|kitty:CMD|claude|codex)"
                 ))
             }
         }

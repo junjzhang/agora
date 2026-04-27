@@ -41,6 +41,8 @@ pub enum Launcher {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<String>,
     },
+    Claude,
+    Codex,
     Browser {
         url: String,
     },
@@ -55,6 +57,8 @@ impl Launcher {
             Launcher::Vscode => "vscode",
             Launcher::Zed => "zed",
             Launcher::Kitty { .. } => "kitty",
+            Launcher::Claude => "claude",
+            Launcher::Codex => "codex",
             Launcher::Browser { .. } => "browser",
             Launcher::Custom { .. } => "custom",
         }
