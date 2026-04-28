@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -33,13 +33,11 @@ struct Inner {
 
 #[derive(Debug, Clone)]
 struct Claim {
-    project: Option<String>,
     app_id: Option<String>,
     title: Option<String>,
     workspace_id: Option<u64>,
     column: Option<usize>,
     pid: Option<i32>,
-    cwd: Option<PathBuf>,
 }
 
 type State = Arc<Mutex<Inner>>;
@@ -209,17 +207,7 @@ fn add(
     };
     inner.projects.push(project.clone());
     store::save(&inner.projects).context("save project store")?;
-    rematch_claims(&mut inner);
     Ok(project)
-}
-
-fn rematch_claims(inner: &mut Inner) {
-    for claim in inner.claims.values_mut() {
-        claim.project = claim
-            .cwd
-            .as_deref()
-            .and_then(|c| match_project(c, &inner.projects));
-    }
 }
 
 fn forget(state: &State, name: String) -> Result<Project> {
@@ -231,7 +219,6 @@ fn forget(state: &State, name: String) -> Result<Project> {
         .ok_or_else(|| anyhow::anyhow!("no project named '{name}'"))?;
     let removed = inner.projects.remove(idx);
     store::save(&inner.projects).context("save project store")?;
-    rematch_claims(&mut inner);
     Ok(removed)
 }
 
@@ -289,7 +276,6 @@ fn rename(state: &State, from: String, to: String) -> Result<Payload> {
     p.ts_last_active = unix_now();
     let project = p.clone();
     store::save(&inner.projects).context("save project store")?;
-    rematch_claims(&mut inner);
 
     Ok(Payload::Renamed {
         project,
@@ -355,7 +341,6 @@ fn update(state: &State, name: String, spec: ProjectSpec) -> Result<Project> {
     p.ts_last_active = unix_now();
     let updated = p.clone();
     store::save(&inner.projects).context("save project store")?;
-    rematch_claims(&mut inner);
     Ok(updated)
 }
 
@@ -672,15 +657,30 @@ fn status(state: &State) -> Payload {
     let mut windows: Vec<WindowSummary> = inner
         .claims
         .iter()
-        .map(|(id, c)| WindowSummary {
-            window_id: *id,
-            project: c.project.clone(),
-            app_id: c.app_id.clone(),
-            title: c.title.clone(),
-            workspace_id: c.workspace_id,
-            column: c.column,
-            pid: c.pid,
-            cwd: c.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        .map(|(id, c)| {
+            // project is whichever project's workspace_name matches this
+            // window's niri workspace name. Single source of truth: niri.
+            let project = c
+                .workspace_id
+                .and_then(|ws_id| inner.workspaces.get(&ws_id))
+                .and_then(|name| name.as_deref())
+                .and_then(|name| {
+                    inner
+                        .projects
+                        .iter()
+                        .find(|p| p.workspace_name == name)
+                        .map(|p| p.id.clone())
+                });
+            WindowSummary {
+                window_id: *id,
+                project,
+                app_id: c.app_id.clone(),
+                title: c.title.clone(),
+                workspace_id: c.workspace_id,
+                column: c.column,
+                pid: c.pid,
+                cwd: None,
+            }
         })
         .collect();
     windows.sort_by_key(|w| (w.workspace_id, w.column, w.window_id));
@@ -731,11 +731,9 @@ fn apply_event(state: &State, event: Event) {
             inner.workspaces = workspaces.iter().map(|w| (w.id, w.name.clone())).collect();
         }
         Event::WindowsChanged { windows } => {
-            // Full snapshot — replace claims.
-            let projects = state.lock().unwrap().projects.clone();
             let mut new_claims: HashMap<u64, Claim> = HashMap::with_capacity(windows.len());
             for w in &windows {
-                new_claims.insert(w.id, build_claim(w, &projects));
+                new_claims.insert(w.id, build_claim(w));
             }
             let mut inner = state.lock().unwrap();
             inner.claims = new_claims;
@@ -748,14 +746,9 @@ fn apply_event(state: &State, event: Event) {
                 .claims
                 .get(&window.id)
                 .and_then(|c| c.workspace_id);
-            let projects = state.lock().unwrap().projects.clone();
-            let claim = build_claim(&window, &projects);
-            let project = claim.project.clone();
+            let claim = build_claim(&window);
             let new_workspace = claim.workspace_id;
             state.lock().unwrap().claims.insert(window.id, claim);
-            if let Some(p) = project {
-                tracing::info!(window_id = window.id, project = %p, app_id = ?window.app_id, "window claimed");
-            }
             // If the window moved to a different workspace, the old one might be empty now.
             if let Some(old) = prev_workspace {
                 if Some(old) != new_workspace {
@@ -818,39 +811,12 @@ fn cleanup_workspace_if_empty(state: &State, ws_id: u64) {
     }
 }
 
-fn build_claim(w: &Window, projects: &[Project]) -> Claim {
-    let cwd = w.pid.and_then(read_proc_cwd);
-    let project = cwd.as_deref().and_then(|c| match_project(c, projects));
+fn build_claim(w: &Window) -> Claim {
     Claim {
-        project,
         app_id: w.app_id.clone(),
         title: w.title.clone(),
         workspace_id: w.workspace_id,
         column: w.layout.pos_in_scrolling_layout.map(|(c, _)| c),
         pid: w.pid,
-        cwd,
     }
-}
-
-fn read_proc_cwd(pid: i32) -> Option<PathBuf> {
-    if pid <= 0 {
-        return None;
-    }
-    fs::read_link(format!("/proc/{pid}/cwd")).ok()
-}
-
-fn match_project(cwd: &Path, projects: &[Project]) -> Option<String> {
-    let mut best: Option<(usize, &Project)> = None;
-    for p in projects {
-        for r in &p.roots {
-            let root = Path::new(&r.path);
-            if cwd.starts_with(root) {
-                let len = root.as_os_str().len();
-                if best.is_none_or(|(l, _)| len > l) {
-                    best = Some((len, p));
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p.id.clone())
 }
