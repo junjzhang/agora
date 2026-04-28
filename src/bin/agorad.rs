@@ -134,8 +134,11 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         Request::Add {
             name,
             root_path,
+            host,
             launchers,
-        } => Ok(Payload::Project(add(state, name, root_path, launchers)?)),
+        } => Ok(Payload::Project(add(
+            state, name, root_path, host, launchers,
+        )?)),
         Request::List => {
             let projects = state.lock().unwrap().projects.clone();
             Ok(Payload::Projects(projects))
@@ -153,19 +156,34 @@ fn add(
     state: &State,
     name: String,
     root_path: String,
+    host: Option<String>,
     launchers: Vec<Launcher>,
 ) -> Result<Project> {
     if name.is_empty() {
         bail!("project name must not be empty");
     }
 
-    let resolved =
-        fs::canonicalize(&root_path).with_context(|| format!("resolve root path {root_path}"))?;
-    let meta = fs::metadata(&resolved).with_context(|| format!("stat {}", resolved.display()))?;
-    if !meta.is_dir() {
-        bail!("root path is not a directory: {}", resolved.display());
-    }
-    let path = resolved.to_string_lossy().into_owned();
+    // Local: canonicalize + must be a directory.
+    // Remote: trust the path; we can't stat across ssh from the daemon.
+    let path = match host.as_deref() {
+        Some("") => bail!("--host is empty; omit it for local"),
+        Some(_) => {
+            if root_path.is_empty() {
+                bail!("root path must not be empty");
+            }
+            root_path
+        }
+        None => {
+            let resolved = fs::canonicalize(&root_path)
+                .with_context(|| format!("resolve root path {root_path}"))?;
+            let meta = fs::metadata(&resolved)
+                .with_context(|| format!("stat {}", resolved.display()))?;
+            if !meta.is_dir() {
+                bail!("root path is not a directory: {}", resolved.display());
+            }
+            resolved.to_string_lossy().into_owned()
+        }
+    };
 
     let mut inner = state.lock().unwrap();
     if inner.projects.iter().any(|p| p.id == name) {
@@ -179,7 +197,7 @@ fn add(
         name,
         roots: vec![Root {
             path,
-            host: None,
+            host,
             label: None,
             launchers,
         }],

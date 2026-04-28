@@ -31,12 +31,15 @@ enum Cmd {
     Add {
         /// Project name (becomes its id and default workspace name)
         name: String,
-        /// Root directory
+        /// Root directory (remote path if --host is given)
         #[arg(default_value = ".")]
         path: String,
+        /// Mark the root as remote (e.g. `gpu.coder`). PATH is not validated locally.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Add a launcher to spawn on `agora open`. May be repeated.
         ///
-        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD`
+        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD` | `claude` | `codex`
         #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
         launchers: Vec<Launcher>,
     },
@@ -85,24 +88,31 @@ fn main() -> Result<()> {
         Cmd::Add {
             name,
             path,
+            host,
             launchers,
         } => {
             let payload = call(Request::Add {
                 name,
                 root_path: path,
+                host,
                 launchers,
             })?;
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
             let kinds: Vec<&'static str> = p.roots[0].launchers.iter().map(|l| l.kind()).collect();
+            let host_part = match p.roots[0].host.as_deref() {
+                Some(h) => format!(" @{h}"),
+                None => String::new(),
+            };
             if kinds.is_empty() {
-                println!("added: {} -> {}", p.id, p.roots[0].path);
+                println!("added: {} -> {}{}", p.id, p.roots[0].path, host_part);
             } else {
                 println!(
-                    "added: {} -> {} (launchers: {})",
+                    "added: {} -> {}{} (launchers: {})",
                     p.id,
                     p.roots[0].path,
+                    host_part,
                     kinds.join(", "),
                 );
             }

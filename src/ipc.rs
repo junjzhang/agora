@@ -24,6 +24,10 @@ pub enum Request {
     Add {
         name: String,
         root_path: String,
+        /// Some(host) marks this as a remote root reachable via ssh; daemon
+        /// skips local canonicalization in that case.
+        #[serde(default)]
+        host: Option<String>,
         #[serde(default)]
         launchers: Vec<Launcher>,
     },
