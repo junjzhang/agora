@@ -630,6 +630,48 @@ fn attach(state: &State, project_name: String, rename_ws: bool) -> Result<Projec
 /// block the caller (hook scripts return immediately). On unknown event names
 /// we just record `last_event` and don't change phase.
 fn apply_hook(state: &State, cli_str: &str, event: &str, payload: &serde_json::Value) {
+    apply_hook_inner(state, cli_str, event, payload);
+    // Drive the bar widget (and any other FileView watcher) by mirroring the
+    // Agents IPC payload to a cache file. Best effort.
+    if let Err(e) = write_agents_cache(state) {
+        tracing::warn!(error = %e, "agents cache write failed");
+    }
+}
+
+fn agents_cache_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let base = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => {
+            let home = std::env::var_os("HOME")?;
+            PathBuf::from(home).join(".cache")
+        }
+    };
+    Some(base.join("agora/agents.json"))
+}
+
+fn write_agents_cache(state: &State) -> Result<()> {
+    let Some(path) = agents_cache_path() else {
+        return Ok(());
+    };
+    let snapshot = agents(state);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir -p {}", parent.display()))?;
+    }
+    let buf = serde_json::to_vec(&snapshot).context("serialize agents")?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &buf).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+fn apply_hook_inner(
+    state: &State,
+    cli_str: &str,
+    event: &str,
+    payload: &serde_json::Value,
+) {
     let cli = match cli_str {
         "claude" => AgentCli::Claude,
         "codex" => AgentCli::Codex,
