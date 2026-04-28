@@ -100,6 +100,12 @@ enum Cmd {
     /// Hook adapter / installer — call from CLI agent hooks
     #[command(subcommand)]
     Hook(HookCmd),
+    /// List active agent sessions known to the daemon
+    Agents {
+        /// Emit JSON instead of human table
+        #[arg(long)]
+        json: bool,
+    },
     /// Bind the focused niri workspace to an existing project
     Attach {
         /// Project name
@@ -250,6 +256,33 @@ fn main() -> Result<()> {
         Cmd::Hook(HookCmd::Install { cli }) => hook_install(&cli)?,
         Cmd::Hook(HookCmd::Uninstall { cli }) => hook_uninstall(&cli)?,
         Cmd::Hook(HookCmd::Event { event, cli }) => hook_event(&event, &cli)?,
+        Cmd::Agents { json } => {
+            let payload = call(Request::Agents)?;
+            let Payload::Agents(agents) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            if json {
+                serde_json::to_writer(std::io::stdout(), &agents).context("serialize agents")?;
+                println!();
+            } else if agents.is_empty() {
+                println!("(no agents)");
+            } else {
+                for a in agents {
+                    let phase = match a.phase {
+                        agora::model::AgentPhase::Idle => "idle",
+                        agora::model::AgentPhase::Running => "running",
+                        agora::model::AgentPhase::WaitingInput => "waiting-input",
+                    };
+                    let proj = a.project.as_deref().unwrap_or("-");
+                    let msg = a
+                        .last_message
+                        .as_deref()
+                        .map(|s| format!(" \"{s}\""))
+                        .unwrap_or_default();
+                    println!("[{}] {phase} project={proj}{msg}", a.session_id);
+                }
+            }
+        }
         Cmd::Attach { name, rename_ws } => {
             let payload = call(Request::Attach {
                 name: name.clone(),

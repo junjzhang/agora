@@ -173,7 +173,62 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             apply_hook(state, &cli, &event, &payload);
             Ok(Payload::Ack)
         }
+        Request::Agents => Ok(Payload::Agents(agents(state))),
     }
+}
+
+fn agents(state: &State) -> Vec<AgentSession> {
+    let inner = state.lock().unwrap();
+    let mut out: Vec<AgentSession> = inner
+        .agents
+        .values()
+        .map(|a| {
+            let mut a = a.clone();
+            a.project = a
+                .cwd
+                .as_deref()
+                .and_then(|c| match_cwd_to_project(c, &inner.projects));
+            a
+        })
+        .collect();
+    // Priority: WaitingInput > Running > Idle. Within each, MRU.
+    out.sort_by(|a, b| {
+        let pa = priority(a.phase);
+        let pb = priority(b.phase);
+        pb.cmp(&pa).then(b.last_change.cmp(&a.last_change))
+    });
+    out
+}
+
+fn priority(phase: AgentPhase) -> u8 {
+    match phase {
+        AgentPhase::WaitingInput => 2,
+        AgentPhase::Running => 1,
+        AgentPhase::Idle => 0,
+    }
+}
+
+/// Longest-prefix match: pick the project whose root contains `cwd`.
+fn match_cwd_to_project(cwd: &str, projects: &[Project]) -> Option<String> {
+    let cwd_path = Path::new(cwd);
+    let mut best: Option<(usize, &Project)> = None;
+    for p in projects {
+        for r in &p.roots {
+            // Only match local roots; remote root paths are in the remote
+            // filesystem namespace, can't compare against local cwd.
+            if r.host.is_some() {
+                continue;
+            }
+            let root = Path::new(&r.path);
+            if cwd_path.starts_with(root) {
+                let len = root.as_os_str().len();
+                if best.is_none_or(|(l, _)| len > l) {
+                    best = Some((len, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p.id.clone())
 }
 
 fn add(
@@ -634,6 +689,7 @@ fn apply_hook(state: &State, cli_str: &str, event: &str, payload: &serde_json::V
             last_event: None,
             last_message: None,
             last_change: now,
+            project: None,
         }
     });
 

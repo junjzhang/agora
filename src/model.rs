@@ -135,4 +135,8 @@ pub struct AgentSession {
     pub last_message: Option<String>,
     /// Unix timestamp of last state change.
     pub last_change: u64,
+    /// Project id derived at IPC-response time from cwd vs project roots.
+    /// Always None inside the daemon's in-memory map; only filled for clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }

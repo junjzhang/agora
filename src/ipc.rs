@@ -86,6 +86,8 @@ pub enum Request {
         event: String,
         payload: serde_json::Value,
     },
+    /// Active agent sessions, with project membership derived per-call.
+    Agents,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +118,7 @@ pub enum Payload {
         /// True if a niri workspace carrying the old name was renamed in lock-step.
         niri_ws_renamed: bool,
     },
+    Agents(Vec<AgentSession>),
 }
 
 /// One window's view as the daemon sees it. Sent in `Status`.
