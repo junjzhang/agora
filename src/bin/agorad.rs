@@ -684,6 +684,7 @@ fn status(state: &State) -> Payload {
                 title: c.title.clone(),
                 workspace_id: c.workspace_id,
                 workspace_idx: ws_info.map(|w| w.idx),
+                workspace_name: ws_info.and_then(|w| w.name.clone()),
                 column: c.column,
                 pid: c.pid,
                 cwd: None,

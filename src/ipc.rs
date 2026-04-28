@@ -93,6 +93,10 @@ pub struct WindowSummary {
     /// niri's per-output 1-based workspace position (shifts on move).
     #[serde(default)]
     pub workspace_idx: Option<u8>,
+    /// niri workspace name, if any. Independent from `project` (a named ws
+    /// without a matching agora project still has a name).
+    #[serde(default)]
+    pub workspace_name: Option<String>,
     pub column: Option<usize>,
     pub pid: Option<i32>,
     pub cwd: Option<String>,

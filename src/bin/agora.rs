@@ -201,9 +201,13 @@ fn main() -> Result<()> {
                 for w in windows {
                     let project = w.project.as_deref().unwrap_or("-");
                     let app = w.app_id.as_deref().unwrap_or("?");
-                    let ws = match (w.workspace_id, w.workspace_idx) {
-                        (Some(id), Some(idx)) => format!("{id}(idx={idx})"),
-                        (Some(id), None) => format!("{id}"),
+                    let ws = match (w.workspace_id, w.workspace_idx, w.workspace_name.as_deref()) {
+                        (Some(id), Some(idx), Some(name)) => {
+                            format!("{id}(idx={idx}, name=\"{name}\")")
+                        }
+                        (Some(id), Some(idx), None) => format!("{id}(idx={idx})"),
+                        (Some(id), None, Some(name)) => format!("{id}(name=\"{name}\")"),
+                        (Some(id), None, None) => format!("{id}"),
                         _ => "-".to_string(),
                     };
                     let col = w
