@@ -20,7 +20,7 @@ use niri_ipc::{
 };
 
 use agora::ipc::{self, Payload, Request, Response, WindowSummary};
-use agora::model::{Launcher, Project, Root};
+use agora::model::{Launcher, Project, ProjectSpec, Root};
 use agora::store;
 
 #[derive(Default)]
@@ -144,14 +144,8 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         Request::Status => Ok(status(state)),
         Request::Forget { name } => Ok(Payload::Project(forget(state, name)?)),
         Request::Rename { from, to } => rename(state, from, to),
-        Request::RootAdd {
-            project,
-            path,
-            label,
-            launchers,
-        } => Ok(Payload::Project(root_add(
-            state, project, path, label, launchers,
-        )?)),
+        Request::Get { name } => Ok(Payload::Project(get(state, name)?)),
+        Request::Update { name, spec } => Ok(Payload::Project(update(state, name, spec)?)),
     }
 }
 
@@ -285,39 +279,127 @@ fn rename(state: &State, from: String, to: String) -> Result<Payload> {
     })
 }
 
-fn root_add(
-    state: &State,
-    project: String,
-    path: String,
-    label: Option<String>,
-    launchers: Vec<Launcher>,
-) -> Result<Project> {
-    let resolved = fs::canonicalize(&path).with_context(|| format!("resolve root path {path}"))?;
-    let meta = fs::metadata(&resolved).with_context(|| format!("stat {}", resolved.display()))?;
-    if !meta.is_dir() {
-        bail!("root path is not a directory: {}", resolved.display());
-    }
-    let path_str = resolved.to_string_lossy().into_owned();
+fn get(state: &State, name: String) -> Result<Project> {
+    let inner = state.lock().unwrap();
+    inner
+        .projects
+        .iter()
+        .find(|p| p.id == name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no project named '{name}'"))
+}
 
+fn update(state: &State, name: String, spec: ProjectSpec) -> Result<Project> {
+    // 1. Existence check (LWW: project may have been forgotten while user was editing).
+    let old_workspace_name = {
+        let inner = state.lock().unwrap();
+        let p = inner
+            .projects
+            .iter()
+            .find(|p| p.id == name)
+            .ok_or_else(|| anyhow::anyhow!("project '{name}' no longer exists (forgotten?)"))?;
+        p.workspace_name.clone()
+    };
+
+    // 2. Validate spec.
+    let normalized_spec = validate_spec(state, &name, spec)?;
+
+    // 3. niri lock-step rename if workspace_name changed and old name is in use.
+    let workspace_name_changed = old_workspace_name != normalized_spec.workspace_name;
+    if workspace_name_changed {
+        let workspaces = match niri_call(NiriRequest::Workspaces)? {
+            NiriResponse::Workspaces(ws) => ws,
+            other => bail!("unexpected niri response to Workspaces: {other:?}"),
+        };
+        let in_use = workspaces
+            .iter()
+            .any(|w| w.name.as_deref() == Some(old_workspace_name.as_str()));
+        if in_use {
+            let action = NiriAction::SetWorkspaceName {
+                name: normalized_spec.workspace_name.clone(),
+                workspace: Some(WorkspaceReferenceArg::Name(old_workspace_name.clone())),
+            };
+            match niri_call(NiriRequest::Action(action))? {
+                NiriResponse::Handled => {}
+                other => bail!("unexpected niri response to SetWorkspaceName: {other:?}"),
+            }
+        }
+    }
+
+    // 4. Apply.
     let mut inner = state.lock().unwrap();
     let p = inner
         .projects
         .iter_mut()
-        .find(|p| p.id == project)
-        .ok_or_else(|| anyhow::anyhow!("no project named '{project}'"))?;
-    if p.roots.iter().any(|r| r.path == path_str) {
-        bail!("project '{project}' already has a root at {path_str}");
-    }
-    p.roots.push(Root {
-        path: path_str,
-        host: None,
-        label,
-        launchers,
-    });
-    let cloned = p.clone();
+        .find(|p| p.id == name)
+        .ok_or_else(|| anyhow::anyhow!("project '{name}' disappeared during update"))?;
+    p.apply_spec(normalized_spec);
+    p.ts_last_active = unix_now();
+    let updated = p.clone();
     store::save(&inner.projects).context("save project store")?;
     rematch_claims(&mut inner);
-    Ok(cloned)
+    Ok(updated)
+}
+
+/// Validate a spec against the current project list. Returns a normalized copy
+/// (local root paths canonicalized; remote root paths left as-is).
+fn validate_spec(state: &State, self_name: &str, mut spec: ProjectSpec) -> Result<ProjectSpec> {
+    if spec.workspace_name.is_empty() {
+        bail!("workspace_name must not be empty");
+    }
+    if spec.roots.is_empty() {
+        bail!("at least one root is required");
+    }
+    if spec.default_root >= spec.roots.len() {
+        bail!(
+            "default_root {} out of range (roots has {} entries)",
+            spec.default_root,
+            spec.roots.len()
+        );
+    }
+
+    // Normalize and validate each root.
+    for (i, root) in spec.roots.iter_mut().enumerate() {
+        if root.path.is_empty() {
+            bail!("roots[{i}].path must not be empty");
+        }
+        match root.host.as_deref() {
+            Some("") => bail!("roots[{i}].host is empty; use null for local"),
+            Some(_) => {
+                // Remote: don't touch the path; we can't stat remote filesystems.
+            }
+            None => {
+                // Local: canonicalize + must be a directory.
+                let resolved = fs::canonicalize(&root.path).with_context(|| {
+                    format!("roots[{i}].path: resolve {} failed", root.path)
+                })?;
+                let meta = fs::metadata(&resolved)
+                    .with_context(|| format!("roots[{i}].path: stat {} failed", resolved.display()))?;
+                if !meta.is_dir() {
+                    bail!(
+                        "roots[{i}].path is not a directory: {}",
+                        resolved.display()
+                    );
+                }
+                root.path = resolved.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    // workspace_name uniqueness across other projects.
+    let inner = state.lock().unwrap();
+    if let Some(other) = inner
+        .projects
+        .iter()
+        .find(|p| p.id != self_name && p.workspace_name == spec.workspace_name)
+    {
+        bail!(
+            "workspace_name '{}' already used by project '{}'",
+            spec.workspace_name,
+            other.id
+        );
+    }
+    Ok(spec)
 }
 
 fn open(state: &State, name: String) -> Result<Payload> {

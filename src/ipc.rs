@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Launcher, Project};
+use crate::model::{Launcher, Project, ProjectSpec};
 
 pub fn socket_path() -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
@@ -39,12 +39,15 @@ pub enum Request {
         from: String,
         to: String,
     },
-    RootAdd {
-        project: String,
-        path: String,
-        label: Option<String>,
-        #[serde(default)]
-        launchers: Vec<Launcher>,
+    /// Read a single project's full record (spec + status).
+    Get {
+        name: String,
+    },
+    /// Replace a project's user-editable spec. Daemon validates and applies
+    /// niri lock-step rename if `workspace_name` changed.
+    Update {
+        name: String,
+        spec: ProjectSpec,
     },
 }
 

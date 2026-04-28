@@ -21,6 +21,39 @@ pub struct Project {
     pub archived_at: Option<u64>,
 }
 
+/// User-editable view of a Project.
+///
+/// `Project` carries both the user's intent (this struct) and runtime metadata
+/// the daemon owns (id, ts_*, archived_at). When a client reads/writes via
+/// `agora edit` or a future GUI, it deals only with `ProjectSpec` — runtime
+/// fields can't be tampered with, and the editor view stays focused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSpec {
+    pub workspace_name: String,
+    pub roots: Vec<Root>,
+    pub default_root: usize,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+impl Project {
+    pub fn spec(&self) -> ProjectSpec {
+        ProjectSpec {
+            workspace_name: self.workspace_name.clone(),
+            roots: self.roots.clone(),
+            default_root: self.default_root,
+            pinned: self.pinned,
+        }
+    }
+
+    pub fn apply_spec(&mut self, spec: ProjectSpec) {
+        self.workspace_name = spec.workspace_name;
+        self.roots = spec.roots;
+        self.default_root = spec.default_root;
+        self.pinned = spec.pinned;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Root {
     pub path: String,

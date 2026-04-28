@@ -3,14 +3,15 @@
 //! Thin client to agorad. Each subcommand maps to one IPC round-trip.
 //! See VISION.html §8 for the full command surface.
 
-use std::io::BufReader;
+use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use agora::ipc::{self, Payload, Request, Response};
-use agora::model::Launcher;
+use agora::model::{Launcher, ProjectSpec};
 
 #[derive(Parser)]
 #[command(
@@ -64,29 +65,10 @@ enum Cmd {
         /// New project name
         to: String,
     },
-    /// Manage roots within a project
-    Root {
-        #[command(subcommand)]
-        action: RootCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum RootCmd {
-    /// Add another root directory to an existing project
-    Add {
+    /// Open the project's spec in $EDITOR; daemon validates and applies on save
+    Edit {
         /// Project name
-        project: String,
-        /// Root directory
-        path: String,
-        /// Optional label for this root (e.g. "code", "paper", "data")
-        #[arg(long)]
-        label: Option<String>,
-        /// Add a launcher tied to this root. May be repeated.
-        ///
-        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD`
-        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
-        launchers: Vec<Launcher>,
+        name: String,
     },
 }
 
@@ -191,39 +173,7 @@ fn main() -> Result<()> {
                 println!("renamed: {} -> {}", from, project.id);
             }
         }
-        Cmd::Root {
-            action:
-                RootCmd::Add {
-                    project,
-                    path,
-                    label,
-                    launchers,
-                },
-        } => {
-            let payload = call(Request::RootAdd {
-                project,
-                path,
-                label,
-                launchers,
-            })?;
-            let Payload::Project(p) = payload else {
-                anyhow::bail!("unexpected payload from daemon: {payload:?}");
-            };
-            let added = p.roots.last().expect("RootAdd must produce a root");
-            let label = added.label.as_deref().unwrap_or("-");
-            let kinds: Vec<&'static str> = added.launchers.iter().map(|l| l.kind()).collect();
-            if kinds.is_empty() {
-                println!("root added: {} <- {} (label={})", p.id, added.path, label);
-            } else {
-                println!(
-                    "root added: {} <- {} (label={}, launchers: {})",
-                    p.id,
-                    added.path,
-                    label,
-                    kinds.join(", "),
-                );
-            }
-        }
+        Cmd::Edit { name } => edit(name)?,
         Cmd::Status => {
             let payload = call(Request::Status)?;
             let Payload::Status {
@@ -259,6 +209,90 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn edit(name: String) -> Result<()> {
+    // 1. Fetch current project from daemon.
+    let payload = call(Request::Get { name: name.clone() })?;
+    let Payload::Project(project) = payload else {
+        bail!("unexpected payload from daemon: {payload:?}");
+    };
+    let original = serde_json::to_string_pretty(&project.spec()).context("serialize spec")?;
+
+    // 2. Write to a tmpfile.
+    let tmp_path = std::env::temp_dir().join(format!(
+        "agora-edit-{}-{}.json",
+        sanitize(&name),
+        std::process::id(),
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("create tmpfile {}", tmp_path.display()))?;
+        f.write_all(original.as_bytes())
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+    }
+
+    // 3. Spawn editor via shell so $EDITOR can be a multi-word command.
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .or_else(|| std::env::var("EDITOR").ok())
+        .unwrap_or_else(|| "vi".to_string());
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!(r#"{editor} "$@""#))
+        .arg("--")
+        .arg(&tmp_path)
+        .status()
+        .with_context(|| format!("invoke editor {editor}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
+        bail!("editor exited non-zero ({status}); aborted");
+    }
+
+    // 4. Read back and diff.
+    let mut edited = String::new();
+    std::fs::File::open(&tmp_path)
+        .with_context(|| format!("reopen {}", tmp_path.display()))?
+        .read_to_string(&mut edited)
+        .with_context(|| format!("read {}", tmp_path.display()))?;
+    if edited.trim() == original.trim() {
+        let _ = std::fs::remove_file(&tmp_path);
+        println!("no changes");
+        return Ok(());
+    }
+
+    // 5. Parse + send Update. On failure, keep tmpfile so user can retry.
+    let spec: ProjectSpec = match serde_json::from_str(&edited) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("parse failed: {e}");
+            eprintln!("your edits are preserved at: {}", tmp_path.display());
+            bail!("invalid JSON; not applied");
+        }
+    };
+    let payload = match call(Request::Update {
+        name: name.clone(),
+        spec,
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("daemon rejected update: {e}");
+            eprintln!("your edits are preserved at: {}", tmp_path.display());
+            return Err(e);
+        }
+    };
+    let Payload::Project(p) = payload else {
+        bail!("unexpected payload from daemon: {payload:?}");
+    };
+    let _ = std::fs::remove_file(&tmp_path);
+    println!("updated: {}", p.id);
+    Ok(())
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn parse_launcher(s: &str) -> Result<Launcher, String> {
