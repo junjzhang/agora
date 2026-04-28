@@ -26,6 +26,30 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum HookCmd {
+    /// Install hook entries into the agent CLI's settings file
+    Install {
+        /// Which CLI to wire up
+        #[arg(long, default_value = "claude")]
+        cli: String,
+    },
+    /// Remove agora hook entries from the agent CLI's settings file
+    Uninstall {
+        #[arg(long, default_value = "claude")]
+        cli: String,
+    },
+    /// Adapter target for hook commands. Reads JSON from stdin,
+    /// forwards to daemon. Invoked by the CLI agent itself.
+    Event {
+        /// Hook event name (PreToolUse / Stop / Notification / ...)
+        event: String,
+        /// CLI source (claude / codex)
+        #[arg(long, default_value = "claude")]
+        cli: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Add a project rooted at PATH (default: current directory)
     Add {
@@ -73,6 +97,9 @@ enum Cmd {
         /// Project name
         name: String,
     },
+    /// Hook adapter / installer — call from CLI agent hooks
+    #[command(subcommand)]
+    Hook(HookCmd),
     /// Bind the focused niri workspace to an existing project
     Attach {
         /// Project name
@@ -220,6 +247,9 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Edit { name } => edit(name)?,
+        Cmd::Hook(HookCmd::Install { cli }) => hook_install(&cli)?,
+        Cmd::Hook(HookCmd::Uninstall { cli }) => hook_uninstall(&cli)?,
+        Cmd::Hook(HookCmd::Event { event, cli }) => hook_event(&event, &cli)?,
         Cmd::Attach { name, rename_ws } => {
             let payload = call(Request::Attach {
                 name: name.clone(),
@@ -281,6 +311,7 @@ fn main() -> Result<()> {
             let Payload::Status {
                 project_count,
                 windows,
+                agents,
             } = payload
             else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
@@ -310,6 +341,31 @@ fn main() -> Result<()> {
                     println!(
                         "  [{}] ws={} col={} app={} project={} \"{}\"",
                         w.window_id, ws, col, app, project, title
+                    );
+                }
+            }
+            if !agents.is_empty() {
+                println!("agents: {}", agents.len());
+                for a in agents {
+                    let cwd = a.cwd.as_deref().unwrap_or("?");
+                    let last = a.last_event.as_deref().unwrap_or("-");
+                    let cli = match a.cli {
+                        agora::model::AgentCli::Claude => "claude",
+                        agora::model::AgentCli::Codex => "codex",
+                    };
+                    let phase = match a.phase {
+                        agora::model::AgentPhase::Idle => "idle",
+                        agora::model::AgentPhase::Running => "running",
+                        agora::model::AgentPhase::WaitingInput => "waiting-input",
+                    };
+                    let msg = a
+                        .last_message
+                        .as_deref()
+                        .map(|s| format!(" \"{s}\""))
+                        .unwrap_or_default();
+                    println!(
+                        "  [{}] {cli} phase={phase} last={last} cwd={cwd}{msg}",
+                        a.session_id
                     );
                 }
             }
@@ -400,6 +456,207 @@ fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+fn hook_event(event: &str, cli: &str) -> Result<()> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("read stdin")?;
+    // Hooks may invoke us with empty stdin (e.g. quick test). Treat as null.
+    let payload: serde_json::Value = if buf.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&buf).context("parse hook stdin as JSON")?
+    };
+    // Fire-and-forget: send and don't fail the hook on daemon error.
+    // Hook scripts must exit cleanly so the agent CLI keeps moving.
+    if let Err(e) = call(Request::Hook {
+        cli: cli.to_string(),
+        event: event.to_string(),
+        payload,
+    }) {
+        eprintln!("agora hook: {e:#}");
+    }
+    Ok(())
+}
+
+/// `~/.claude/settings.json` for claude. Codex path differs but the install
+/// surface is the same (settings.json + hooks).
+fn hook_settings_path(cli: &str) -> Result<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME not set")?;
+    let dir = match cli {
+        "claude" => ".claude",
+        "codex" => ".codex",
+        other => anyhow::bail!("unknown cli '{other}' (expected claude|codex)"),
+    };
+    Ok(std::path::PathBuf::from(home).join(dir).join("settings.json"))
+}
+
+/// Marker substring: any hook command containing this is ours.
+const HOOK_MARK: &str = "agora hook event";
+
+/// Hook events we install for. Mirrors VibeHub's set, minus PermissionRequest
+/// (we don't mediate decisions; user responds in their terminal).
+fn hook_events_for(cli: &str) -> &'static [(&'static str, bool)] {
+    // (event_name, needs_matcher_field)
+    match cli {
+        "claude" => &[
+            ("SessionStart", false),
+            ("SessionEnd", false),
+            ("UserPromptSubmit", false),
+            ("PreToolUse", true),
+            ("PostToolUse", true),
+            ("Notification", true),
+            ("Stop", false),
+            ("SubagentStop", false),
+        ],
+        // Codex hook surface is different; left empty for now.
+        _ => &[],
+    }
+}
+
+fn hook_install(cli: &str) -> Result<()> {
+    let path = hook_settings_path(cli)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("mkdir -p {}", parent.display()))?;
+    }
+    let mut data: serde_json::Value = if path.exists() {
+        let buf = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if buf.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&buf)
+                .with_context(|| format!("parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+    if !data.is_object() {
+        anyhow::bail!("{} root is not a JSON object", path.display());
+    }
+    let hooks = data
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        anyhow::bail!("hooks field in {} is not an object", path.display());
+    }
+    let hooks = hooks.as_object_mut().unwrap();
+
+    let cmd = format!("agora hook event --cli {cli} {{event}}"); // placeholder; replaced per-event
+    let events = hook_events_for(cli);
+    if events.is_empty() {
+        anyhow::bail!("no hooks defined for cli '{cli}' yet");
+    }
+    let mut added = 0;
+    let mut already = 0;
+    for (event_name, needs_matcher) in events {
+        let event_cmd = cmd.replace("{event}", event_name);
+        let entry = if *needs_matcher {
+            serde_json::json!({
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": event_cmd }],
+            })
+        } else {
+            serde_json::json!({
+                "hooks": [{ "type": "command", "command": event_cmd }],
+            })
+        };
+        let arr = hooks
+            .entry(event_name.to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if !arr.is_array() {
+            anyhow::bail!(
+                "hooks.{event_name} in {} is not an array",
+                path.display()
+            );
+        }
+        let arr = arr.as_array_mut().unwrap();
+        let already_present = arr.iter().any(|item| {
+            item.get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.contains(HOOK_MARK))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if already_present {
+            already += 1;
+        } else {
+            arr.push(entry);
+            added += 1;
+        }
+    }
+    let buf = serde_json::to_vec_pretty(&data).context("serialize settings")?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &buf).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    println!(
+        "{}: {added} event(s) added, {already} already present",
+        path.display()
+    );
+    Ok(())
+}
+
+fn hook_uninstall(cli: &str) -> Result<()> {
+    let path = hook_settings_path(cli)?;
+    if !path.exists() {
+        println!("{}: not present, nothing to uninstall", path.display());
+        return Ok(());
+    }
+    let buf = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    if buf.trim().is_empty() {
+        return Ok(());
+    }
+    let mut data: serde_json::Value = serde_json::from_str(&buf)
+        .with_context(|| format!("parse {} as JSON", path.display()))?;
+    let Some(hooks) = data
+        .as_object_mut()
+        .and_then(|o| o.get_mut("hooks"))
+        .and_then(|h| h.as_object_mut())
+    else {
+        println!("{}: no hooks section, nothing to do", path.display());
+        return Ok(());
+    };
+    let mut removed = 0;
+    for (_event, value) in hooks.iter_mut() {
+        if let Some(arr) = value.as_array_mut() {
+            let before = arr.len();
+            arr.retain(|item| {
+                let ours = item
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.contains(HOOK_MARK))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                !ours
+            });
+            removed += before - arr.len();
+        }
+    }
+    let buf = serde_json::to_vec_pretty(&data).context("serialize settings")?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &buf).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    println!("{}: removed {removed} agora hook entr(ies)", path.display());
+    Ok(())
 }
 
 /// Daemon's `fs::canonicalize` is relative to the daemon's cwd (often `/`),

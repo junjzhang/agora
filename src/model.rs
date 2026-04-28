@@ -97,3 +97,42 @@ impl Launcher {
         }
     }
 }
+
+/// Which CLI agent this session belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCli {
+    Claude,
+    Codex,
+}
+
+/// Coarse-grained agent state. v1 derives this from Claude Code hook events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    /// Session known to exist; no recent user prompt or finished turn.
+    Idle,
+    /// User prompt submitted, agent processing, no `Stop` yet.
+    Running,
+    /// Agent emitted a Notification — almost always means it wants attention.
+    WaitingInput,
+}
+
+/// One agent session as the daemon tracks it. Keyed by `session_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub session_id: String,
+    pub cli: AgentCli,
+    pub phase: AgentPhase,
+    /// `cwd` reported by the hook payload. Used to derive project membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Last hook event seen, for debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event: Option<String>,
+    /// Most recent Notification message (truncated upstream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// Unix timestamp of last state change.
+    pub last_change: u64,
+}

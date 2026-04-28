@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Launcher, Project, ProjectSpec};
+use crate::model::{AgentSession, Launcher, Project, ProjectSpec};
 
 pub fn socket_path() -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
@@ -78,6 +78,14 @@ pub enum Request {
         #[serde(default)]
         rename_ws: bool,
     },
+    /// Hook event from a CLI agent (Claude Code / Codex). Daemon updates
+    /// the per-session AgentState. `payload` is the raw JSON the hook gave
+    /// us on stdin — daemon picks out session_id, cwd, event-specific bits.
+    Hook {
+        cli: String,
+        event: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +96,8 @@ pub enum Response {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Payload {
+    /// Generic acknowledgement for fire-and-forget operations.
+    Ack,
     Project(Project),
     Projects(Vec<Project>),
     Opened {
@@ -98,6 +108,8 @@ pub enum Payload {
     Status {
         project_count: usize,
         windows: Vec<WindowSummary>,
+        #[serde(default)]
+        agents: Vec<AgentSession>,
     },
     Renamed {
         project: Project,

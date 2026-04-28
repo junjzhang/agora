@@ -20,7 +20,7 @@ use niri_ipc::{
 };
 
 use agora::ipc::{self, Payload, Request, Response, WindowSummary};
-use agora::model::{Launcher, Project, ProjectSpec, Root};
+use agora::model::{AgentCli, AgentPhase, AgentSession, Launcher, Project, ProjectSpec, Root};
 use agora::store;
 
 #[derive(Default)]
@@ -30,6 +30,8 @@ struct Inner {
     /// niri workspace id → its current (idx, name). Driven by WorkspacesChanged.
     /// idx is per-output, 1-based, and shifts when workspaces are moved.
     workspaces: HashMap<u64, WorkspaceInfo>,
+    /// Agent sessions keyed by session_id. Driven by `Request::Hook`.
+    agents: HashMap<String, AgentSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,7 @@ fn main() -> Result<()> {
         projects,
         claims: HashMap::new(),
         workspaces: HashMap::new(),
+        agents: HashMap::new(),
     }));
 
     {
@@ -165,6 +168,10 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         )?)),
         Request::Attach { name, rename_ws } => {
             Ok(Payload::Project(attach(state, name, rename_ws)?))
+        }
+        Request::Hook { cli, event, payload } => {
+            apply_hook(state, &cli, &event, &payload);
+            Ok(Payload::Ack)
         }
     }
 }
@@ -564,6 +571,105 @@ fn attach(state: &State, project_name: String, rename_ws: bool) -> Result<Projec
     Ok(updated)
 }
 
+/// Apply a hook event to the agent state machine. Fire-and-forget; we never
+/// block the caller (hook scripts return immediately). On unknown event names
+/// we just record `last_event` and don't change phase.
+fn apply_hook(state: &State, cli_str: &str, event: &str, payload: &serde_json::Value) {
+    let cli = match cli_str {
+        "claude" => AgentCli::Claude,
+        "codex" => AgentCli::Codex,
+        other => {
+            tracing::warn!(cli = %other, "unknown CLI source in hook event; ignoring");
+            return;
+        }
+    };
+    let Some(session_id) = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
+        tracing::warn!(event = %event, "hook payload missing session_id; ignoring");
+        return;
+    };
+    let cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Notification message: a short reason the agent wants attention.
+    let message = if event == "Notification" {
+        payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.len() > 200 {
+                    format!("{}…", &trimmed[..200])
+                } else {
+                    trimmed.to_string()
+                }
+            })
+    } else {
+        None
+    };
+
+    let now = unix_now();
+    let mut inner = state.lock().unwrap();
+
+    // SessionEnd → forget the session.
+    if event == "SessionEnd" {
+        if inner.agents.remove(&session_id).is_some() {
+            tracing::info!(session = %session_id, "agent session ended");
+        }
+        return;
+    }
+
+    let entry = inner.agents.entry(session_id.clone()).or_insert_with(|| {
+        tracing::info!(session = %session_id, %cli_str, "agent session registered");
+        AgentSession {
+            session_id: session_id.clone(),
+            cli,
+            phase: AgentPhase::Idle,
+            cwd: cwd.clone(),
+            last_event: None,
+            last_message: None,
+            last_change: now,
+        }
+    });
+
+    // Refresh fields that any event tells us about.
+    if cwd.is_some() {
+        entry.cwd = cwd;
+    }
+    entry.last_event = Some(event.to_string());
+
+    let new_phase = match event {
+        "SessionStart" => AgentPhase::Idle,
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PreCompact" => AgentPhase::Running,
+        "Notification" => AgentPhase::WaitingInput,
+        "Stop" | "SubagentStop" => AgentPhase::Idle,
+        _ => entry.phase, // unknown: keep current
+    };
+
+    if let Some(msg) = message {
+        entry.last_message = Some(msg);
+    } else if event == "UserPromptSubmit" {
+        entry.last_message = None;
+    }
+
+    if entry.phase != new_phase {
+        tracing::info!(
+            session = %session_id,
+            from = ?entry.phase,
+            to = ?new_phase,
+            event = %event,
+            "agent phase change",
+        );
+        entry.phase = new_phase;
+        entry.last_change = now;
+    }
+}
+
 /// Validate a spec against the current project list. Returns a normalized copy
 /// (local root paths canonicalized; remote root paths left as-is).
 fn validate_spec(state: &State, self_name: &str, mut spec: ProjectSpec) -> Result<ProjectSpec> {
@@ -905,9 +1011,12 @@ fn status(state: &State) -> Payload {
         })
         .collect();
     windows.sort_by_key(|w| (w.workspace_id, w.column, w.window_id));
+    let mut agents: Vec<AgentSession> = inner.agents.values().cloned().collect();
+    agents.sort_by(|a, b| b.last_change.cmp(&a.last_change));
     Payload::Status {
         project_count: inner.projects.len(),
         windows,
+        agents,
     }
 }
 
