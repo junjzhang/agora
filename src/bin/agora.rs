@@ -201,10 +201,11 @@ fn main() -> Result<()> {
                 for w in windows {
                     let project = w.project.as_deref().unwrap_or("-");
                     let app = w.app_id.as_deref().unwrap_or("?");
-                    let ws = w
-                        .workspace_id
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "-".into());
+                    let ws = match (w.workspace_id, w.workspace_idx) {
+                        (Some(id), Some(idx)) => format!("{id}(idx={idx})"),
+                        (Some(id), None) => format!("{id}"),
+                        _ => "-".to_string(),
+                    };
                     let col = w
                         .column
                         .map(|c| c.to_string())

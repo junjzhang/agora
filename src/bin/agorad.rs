@@ -27,8 +27,15 @@ use agora::store;
 struct Inner {
     projects: Vec<Project>,
     claims: HashMap<u64, Claim>,
-    /// niri workspace id → current name (None if unnamed). Driven by WorkspacesChanged.
-    workspaces: HashMap<u64, Option<String>>,
+    /// niri workspace id → its current (idx, name). Driven by WorkspacesChanged.
+    /// idx is per-output, 1-based, and shifts when workspaces are moved.
+    workspaces: HashMap<u64, WorkspaceInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceInfo {
+    idx: u8,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -660,10 +667,9 @@ fn status(state: &State) -> Payload {
         .map(|(id, c)| {
             // project is whichever project's workspace_name matches this
             // window's niri workspace name. Single source of truth: niri.
-            let project = c
-                .workspace_id
-                .and_then(|ws_id| inner.workspaces.get(&ws_id))
-                .and_then(|name| name.as_deref())
+            let ws_info = c.workspace_id.and_then(|ws_id| inner.workspaces.get(&ws_id));
+            let project = ws_info
+                .and_then(|w| w.name.as_deref())
                 .and_then(|name| {
                     inner
                         .projects
@@ -677,6 +683,7 @@ fn status(state: &State) -> Payload {
                 app_id: c.app_id.clone(),
                 title: c.title.clone(),
                 workspace_id: c.workspace_id,
+                workspace_idx: ws_info.map(|w| w.idx),
                 column: c.column,
                 pid: c.pid,
                 cwd: None,
@@ -728,7 +735,18 @@ fn apply_event(state: &State, event: Event) {
     match event {
         Event::WorkspacesChanged { workspaces } => {
             let mut inner = state.lock().unwrap();
-            inner.workspaces = workspaces.iter().map(|w| (w.id, w.name.clone())).collect();
+            inner.workspaces = workspaces
+                .iter()
+                .map(|w| {
+                    (
+                        w.id,
+                        WorkspaceInfo {
+                            idx: w.idx,
+                            name: w.name.clone(),
+                        },
+                    )
+                })
+                .collect();
         }
         Event::WindowsChanged { windows } => {
             let mut new_claims: HashMap<u64, Claim> = HashMap::with_capacity(windows.len());
@@ -778,7 +796,7 @@ fn apply_event(state: &State, event: Event) {
 fn cleanup_workspace_if_empty(state: &State, ws_id: u64) {
     let name = {
         let inner = state.lock().unwrap();
-        let Some(Some(name)) = inner.workspaces.get(&ws_id).cloned() else {
+        let Some(name) = inner.workspaces.get(&ws_id).and_then(|w| w.name.clone()) else {
             return;
         };
         let is_project_ws = inner.projects.iter().any(|p| p.workspace_name == name);
