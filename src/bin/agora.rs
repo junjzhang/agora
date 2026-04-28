@@ -73,6 +73,15 @@ enum Cmd {
         /// Project name
         name: String,
     },
+    /// Bind the focused niri workspace to an existing project
+    Attach {
+        /// Project name
+        name: String,
+        /// Rename/claim the focused ws to project's workspace_name
+        /// (default: update project's workspace_name to match the ws's name)
+        #[arg(long)]
+        rename_ws: bool,
+    },
     /// Promote the currently focused niri workspace into a project
     Promote {
         /// Project id override. Default: focused ws name → basename(PATH)
@@ -211,6 +220,19 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Edit { name } => edit(name)?,
+        Cmd::Attach { name, rename_ws } => {
+            let payload = call(Request::Attach {
+                name: name.clone(),
+                rename_ws,
+            })?;
+            let Payload::Project(p) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            println!(
+                "attached: project {} <-> workspace '{}'",
+                p.id, p.workspace_name
+            );
+        }
         Cmd::Promote {
             name,
             path,

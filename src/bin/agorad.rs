@@ -163,6 +163,9 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         } => Ok(Payload::Project(promote(
             state, name, root_path, host, launchers, rename_ws,
         )?)),
+        Request::Attach { name, rename_ws } => {
+            Ok(Payload::Project(attach(state, name, rename_ws)?))
+        }
     }
 }
 
@@ -485,6 +488,80 @@ fn promote(
     inner.projects.push(project.clone());
     store::save(&inner.projects).context("save project store")?;
     Ok(project)
+}
+
+fn attach(state: &State, project_name: String, rename_ws: bool) -> Result<Project> {
+    // 1. Project must exist.
+    let current_workspace_name = {
+        let inner = state.lock().unwrap();
+        inner
+            .projects
+            .iter()
+            .find(|p| p.id == project_name)
+            .map(|p| p.workspace_name.clone())
+            .ok_or_else(|| anyhow::anyhow!("no project named '{project_name}'"))?
+    };
+
+    // 2. Find the focused niri workspace.
+    let workspaces = match niri_call(NiriRequest::Workspaces)? {
+        NiriResponse::Workspaces(ws) => ws,
+        other => bail!("unexpected niri response to Workspaces: {other:?}"),
+    };
+    let focused = workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .ok_or_else(|| anyhow::anyhow!("no focused niri workspace"))?;
+
+    // 3. Pick direction.
+    let new_workspace_name = if rename_ws {
+        // ws follows project: SetWorkspaceName(focused, project.workspace_name).
+        // No-op if focused already named that. Niri rejects if another ws holds the name.
+        if focused.name.as_deref() != Some(current_workspace_name.as_str()) {
+            let action = NiriAction::SetWorkspaceName {
+                name: current_workspace_name.clone(),
+                workspace: Some(WorkspaceReferenceArg::Id(focused.id)),
+            };
+            match niri_call(NiriRequest::Action(action))? {
+                NiriResponse::Handled => {}
+                other => bail!("unexpected niri response to SetWorkspaceName: {other:?}"),
+            }
+        }
+        current_workspace_name.clone()
+    } else {
+        // project follows ws: project.workspace_name = focused.name.
+        let ws_name = focused.name.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "focused workspace is unnamed; pass --rename-ws to claim it as '{current_workspace_name}'"
+            )
+        })?;
+        // Reject if another project already uses this workspace_name.
+        let inner = state.lock().unwrap();
+        if let Some(other) = inner
+            .projects
+            .iter()
+            .find(|p| p.id != project_name && p.workspace_name == ws_name)
+        {
+            bail!(
+                "workspace_name '{}' already used by project '{}'",
+                ws_name,
+                other.id
+            );
+        }
+        ws_name
+    };
+
+    // 4. Persist.
+    let mut inner = state.lock().unwrap();
+    let p = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_name)
+        .ok_or_else(|| anyhow::anyhow!("project '{project_name}' disappeared during attach"))?;
+    p.workspace_name = new_workspace_name;
+    p.ts_last_active = unix_now();
+    let updated = p.clone();
+    store::save(&inner.projects).context("save project store")?;
+    Ok(updated)
 }
 
 /// Validate a spec against the current project list. Returns a normalized copy

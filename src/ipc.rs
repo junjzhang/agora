@@ -66,6 +66,18 @@ pub enum Request {
         #[serde(default)]
         rename_ws: bool,
     },
+    /// Bind the focused niri workspace to an existing project.
+    ///
+    /// Default direction: `project.workspace_name` is updated to match the
+    /// focused ws's current name (project follows ws). With `rename_ws`, the
+    /// focused ws is renamed/claimed to the project's `workspace_name`
+    /// instead (ws follows project) — same semantics as `agora promote`'s
+    /// flag.
+    Attach {
+        name: String,
+        #[serde(default)]
+        rename_ws: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
