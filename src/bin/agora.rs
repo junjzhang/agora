@@ -73,6 +73,26 @@ enum Cmd {
         /// Project name
         name: String,
     },
+    /// Promote the currently focused niri workspace into a project
+    Promote {
+        /// Project id override. Default: focused ws name → basename(PATH)
+        #[arg(long)]
+        name: Option<String>,
+        /// Root directory (default: current dir)
+        #[arg(default_value = ".")]
+        path: String,
+        /// Mark the root as remote (e.g. `gpu.coder`).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// Add a launcher. May be repeated.
+        ///
+        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD` | `claude` | `codex`
+        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
+        launchers: Vec<Launcher>,
+        /// If --name conflicts with the focused ws's existing name, rename the ws.
+        #[arg(long)]
+        rename_ws: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -91,9 +111,16 @@ fn main() -> Result<()> {
             host,
             launchers,
         } => {
+            // Daemon canonicalize uses its own cwd (likely `/`), so resolve
+            // relative paths against the user's cwd here. Skip for remote roots.
+            let root_path = if host.is_some() {
+                path
+            } else {
+                resolve_local_path(&path)?
+            };
             let payload = call(Request::Add {
                 name,
-                root_path: path,
+                root_path,
                 host,
                 launchers,
             })?;
@@ -184,6 +211,49 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Edit { name } => edit(name)?,
+        Cmd::Promote {
+            name,
+            path,
+            host,
+            launchers,
+            rename_ws,
+        } => {
+            let root_path = if host.is_some() {
+                path
+            } else {
+                resolve_local_path(&path)?
+            };
+            let payload = call(Request::Promote {
+                name,
+                root_path,
+                host,
+                launchers,
+                rename_ws,
+            })?;
+            let Payload::Project(p) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            let kinds: Vec<&'static str> = p.roots[0].launchers.iter().map(|l| l.kind()).collect();
+            let host_part = match p.roots[0].host.as_deref() {
+                Some(h) => format!(" @{h}"),
+                None => String::new(),
+            };
+            if kinds.is_empty() {
+                println!(
+                    "promoted: {} -> {}{} (workspace: '{}')",
+                    p.id, p.roots[0].path, host_part, p.workspace_name
+                );
+            } else {
+                println!(
+                    "promoted: {} -> {}{} (workspace: '{}', launchers: {})",
+                    p.id,
+                    p.roots[0].path,
+                    host_part,
+                    p.workspace_name,
+                    kinds.join(", "),
+                );
+            }
+        }
         Cmd::Status => {
             let payload = call(Request::Status)?;
             let Payload::Status {
@@ -308,6 +378,18 @@ fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+/// Daemon's `fs::canonicalize` is relative to the daemon's cwd (often `/`),
+/// so resolve user-relative paths here before sending. Daemon still does its
+/// own canonicalize (symlinks, etc) afterwards.
+fn resolve_local_path(path: &str) -> Result<String> {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return Ok(path.to_string());
+    }
+    let cwd = std::env::current_dir().context("read cwd")?;
+    Ok(cwd.join(p).to_string_lossy().into_owned())
 }
 
 fn parse_launcher(s: &str) -> Result<Launcher, String> {

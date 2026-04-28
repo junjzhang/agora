@@ -154,6 +154,15 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         Request::Rename { from, to } => rename(state, from, to),
         Request::Get { name } => Ok(Payload::Project(get(state, name)?)),
         Request::Update { name, spec } => Ok(Payload::Project(update(state, name, spec)?)),
+        Request::Promote {
+            name,
+            root_path,
+            host,
+            launchers,
+            rename_ws,
+        } => Ok(Payload::Project(promote(
+            state, name, root_path, host, launchers, rename_ws,
+        )?)),
     }
 }
 
@@ -349,6 +358,133 @@ fn update(state: &State, name: String, spec: ProjectSpec) -> Result<Project> {
     let updated = p.clone();
     store::save(&inner.projects).context("save project store")?;
     Ok(updated)
+}
+
+fn promote(
+    state: &State,
+    name_arg: Option<String>,
+    root_path: String,
+    host: Option<String>,
+    launchers: Vec<Launcher>,
+    rename_ws: bool,
+) -> Result<Project> {
+    // 1. Find the focused niri workspace.
+    let workspaces = match niri_call(NiriRequest::Workspaces)? {
+        NiriResponse::Workspaces(ws) => ws,
+        other => bail!("unexpected niri response to Workspaces: {other:?}"),
+    };
+    let focused = workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .ok_or_else(|| anyhow::anyhow!("no focused niri workspace"))?;
+
+    // 2. Resolve the root path (local: stat; remote: pass-through).
+    let resolved_path = match host.as_deref() {
+        Some("") => bail!("--host is empty; omit it for local"),
+        Some(_) => {
+            if root_path.is_empty() {
+                bail!("root path must not be empty");
+            }
+            root_path.clone()
+        }
+        None => {
+            let resolved = fs::canonicalize(&root_path)
+                .with_context(|| format!("resolve root path {root_path}"))?;
+            let meta = fs::metadata(&resolved)
+                .with_context(|| format!("stat {}", resolved.display()))?;
+            if !meta.is_dir() {
+                bail!("root path is not a directory: {}", resolved.display());
+            }
+            resolved.to_string_lossy().into_owned()
+        }
+    };
+
+    // 3. Derive id: --name → focused.name → basename(resolved_path).
+    let derived = name_arg
+        .clone()
+        .or_else(|| focused.name.clone())
+        .or_else(|| {
+            Path::new(&resolved_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow::anyhow!("could not derive a name; pass --name"))?;
+    if derived.is_empty() {
+        bail!("derived name is empty; pass --name");
+    }
+
+    // 4. Detect ws name conflict (only when --name explicit AND ws already named differently).
+    let ws_rename_needed = match (focused.name.as_deref(), name_arg.as_deref()) {
+        (Some(ws_name), Some(arg_name)) if ws_name != arg_name => {
+            if !rename_ws {
+                bail!(
+                    "current workspace is named '{ws_name}'; \
+                     pass --rename-ws to rename it to '{arg_name}', \
+                     or use --name {ws_name} to keep it"
+                );
+            }
+            true
+        }
+        _ => false,
+    };
+
+    // 5. Uniqueness checks (against existing projects).
+    {
+        let inner = state.lock().unwrap();
+        if inner.projects.iter().any(|p| p.id == derived) {
+            bail!("project '{derived}' already exists");
+        }
+        if let Some(other) = inner
+            .projects
+            .iter()
+            .find(|p| p.workspace_name == derived)
+        {
+            bail!(
+                "workspace_name '{derived}' already used by project '{}'",
+                other.id
+            );
+        }
+    }
+
+    // 6. Touch niri: claim if unnamed, or rename if --rename-ws.
+    let needs_set_name = focused.name.is_none() || ws_rename_needed;
+    if needs_set_name {
+        let action = NiriAction::SetWorkspaceName {
+            name: derived.clone(),
+            workspace: Some(WorkspaceReferenceArg::Id(focused.id)),
+        };
+        match niri_call(NiriRequest::Action(action))? {
+            NiriResponse::Handled => {}
+            other => bail!("unexpected niri response to SetWorkspaceName: {other:?}"),
+        }
+    }
+
+    // 7. Persist the new project.
+    let mut inner = state.lock().unwrap();
+    if inner.projects.iter().any(|p| p.id == derived) {
+        bail!("project '{derived}' was created concurrently");
+    }
+    let now = unix_now();
+    let project = Project {
+        id: derived.clone(),
+        name: derived.clone(),
+        workspace_name: derived.clone(),
+        roots: vec![Root {
+            path: resolved_path,
+            host,
+            label: None,
+            launchers,
+        }],
+        default_root: 0,
+        pinned: false,
+        ts_created: now,
+        ts_last_active: now,
+        archived_at: None,
+    };
+    inner.projects.push(project.clone());
+    store::save(&inner.projects).context("save project store")?;
+    Ok(project)
 }
 
 /// Validate a spec against the current project list. Returns a normalized copy

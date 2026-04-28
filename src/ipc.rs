@@ -53,6 +53,19 @@ pub enum Request {
         name: String,
         spec: ProjectSpec,
     },
+    /// Promote the currently focused niri workspace into an agora project.
+    /// Derives id from `name` arg, then ws name, then basename(root_path).
+    Promote {
+        name: Option<String>,
+        root_path: String,
+        host: Option<String>,
+        #[serde(default)]
+        launchers: Vec<Launcher>,
+        /// If the focused ws is already named differently from the resolved id,
+        /// rename the ws to match instead of erroring.
+        #[serde(default)]
+        rename_ws: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
