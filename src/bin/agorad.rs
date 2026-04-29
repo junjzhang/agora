@@ -402,42 +402,13 @@ fn focus_agent(state: &State, session_id: &str) -> Result<()> {
     };
 
     if is_remote {
-        // Remote agent: focus the project workspace (which likely has the SSH
-        // terminal), or find a window whose title contains the host.
-        let agent = state.lock().unwrap().agents.get(session_id).cloned();
-        let agent = agent.ok_or_else(|| anyhow::anyhow!("agent gone"))?;
-        let project = agent
-            .cwd
-            .as_deref()
-            .and_then(|c| match_cwd_to_project(c, agent_host.as_deref(), &state.lock().unwrap().projects));
-
-        if let Some(proj_id) = project {
-            let ws_name = state
-                .lock()
-                .unwrap()
-                .projects
-                .iter()
-                .find(|p| p.id == proj_id)
-                .map(|p| p.workspace_name.clone());
-            if let Some(name) = ws_name {
-                let action = NiriAction::FocusWorkspace {
-                    reference: WorkspaceReferenceArg::Name(name),
-                };
-                if let Ok(NiriResponse::Handled) = niri_call(NiriRequest::Action(action)) {
-                    return Ok(());
-                }
-            }
-        }
-        // Fallback: search window titles for the host name.
         let host_str = agent_host.as_deref().unwrap_or("");
+        // Find the local kitty window whose process tree contains an ssh
+        // session to the agent's host — that's the terminal the user
+        // interacts with.
         let window_id = {
             let inner = state.lock().unwrap();
-            inner.claims.iter().find_map(|(wid, c)| {
-                c.title
-                    .as_deref()
-                    .filter(|t| t.contains(host_str))
-                    .map(|_| *wid)
-            })
+            find_window_with_ssh_to(&inner.claims, host_str)
         };
         if let Some(wid) = window_id {
             let action = NiriAction::FocusWindow { id: wid };
@@ -447,7 +418,7 @@ fn focus_agent(state: &State, session_id: &str) -> Result<()> {
             }
         }
         bail!(
-            "remote agent (host={}); no matching workspace or window found",
+            "remote agent (host={}); no local terminal with SSH to that host found",
             host_str
         );
     }
@@ -496,6 +467,45 @@ fn find_window_for_pid(claims: &HashMap<u64, Claim>, start_pid: i32) -> Option<u
         pid = ppid;
     }
     None
+}
+
+/// Find a kitty window whose process tree contains an ssh session to `host`.
+fn find_window_with_ssh_to(claims: &HashMap<u64, Claim>, host: &str) -> Option<u64> {
+    for (wid, claim) in claims {
+        if claim.app_id.as_deref() != Some("kitty") {
+            continue;
+        }
+        let Some(pid) = claim.pid else { continue };
+        if descendant_has_ssh_to(pid, host, 0) {
+            return Some(*wid);
+        }
+    }
+    None
+}
+
+fn descendant_has_ssh_to(pid: i32, host: &str, depth: u32) -> bool {
+    if depth > 10 {
+        return false;
+    }
+    let Ok(children_str) = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
+        return false;
+    };
+    for child_str in children_str.split_whitespace() {
+        let Ok(child) = child_str.parse::<i32>() else {
+            continue;
+        };
+        // Check if this child is an ssh process connecting to the host.
+        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{child}/cmdline")) {
+            let args = cmdline.replace('\0', " ");
+            if (args.contains("ssh") || args.contains("kitten")) && args.contains(host) {
+                return true;
+            }
+        }
+        if descendant_has_ssh_to(child, host, depth + 1) {
+            return true;
+        }
+    }
+    false
 }
 
 fn start_tunnel(state: &State, host: RemoteHost) {
