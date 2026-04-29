@@ -9,14 +9,28 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AgentSession, Launcher, Project, ProjectSpec};
+use crate::model::{AgentSession, Launcher, Project, ProjectSpec, RemoteHost};
 
 pub fn socket_path() -> Result<PathBuf> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR not set")?;
-    if dir.is_empty() {
-        anyhow::bail!("XDG_RUNTIME_DIR is empty");
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if !d.is_empty() {
+            return Ok(PathBuf::from(d).join("agora.sock"));
+        }
     }
-    Ok(PathBuf::from(dir).join("agora.sock"))
+    // Fallback when XDG_RUNTIME_DIR isn't set — common in ssh non-login
+    // shells. systemd-logind still creates /run/user/$UID on most systems.
+    let uid = unsafe { libc::getuid() };
+    let path = PathBuf::from(format!("/run/user/{uid}/agora.sock"));
+    let parent_exists = path.parent().map(|p| p.exists()).unwrap_or(false);
+    if parent_exists {
+        return Ok(path);
+    }
+    anyhow::bail!(
+        "could not locate agora socket: XDG_RUNTIME_DIR unset and {} missing",
+        path.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    );
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +102,17 @@ pub enum Request {
     },
     /// Active agent sessions, with project membership derived per-call.
     Agents,
+    /// Register a remote host. Daemon brings up an SSH reverse-forward
+    /// tunnel and persists the entry. `remote_uid` is needed to construct the
+    /// remote socket path; CLI queries it via `ssh host id -u` before sending.
+    RemoteAdd {
+        host: String,
+        remote_uid: u32,
+    },
+    RemoteRemove {
+        host: String,
+    },
+    RemoteList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +144,27 @@ pub enum Payload {
         niri_ws_renamed: bool,
     },
     Agents(Vec<AgentSession>),
+    Remotes(Vec<RemoteSummary>),
+    Remote(RemoteSummary),
+}
+
+/// One remote, with both stored config and live tunnel status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSummary {
+    pub host: RemoteHost,
+    pub status: RemoteStatus,
+    /// Last error string from the tunnel manager, if any (for display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed,
 }
 
 /// One window's view as the daemon sees it. Sent in `Status`.

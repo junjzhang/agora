@@ -26,12 +26,39 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum RemoteCmd {
+    /// Register a remote host. Daemon brings up an SSH reverse-forward tunnel.
+    Add {
+        /// SSH alias / hostname (must resolve via your ~/.ssh/config)
+        host: String,
+    },
+    /// Remove a remote host (also tears down its tunnel).
+    Remove {
+        host: String,
+    },
+    /// List configured remotes with tunnel status.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push the agora binary to the remote and install hooks there.
+    Install {
+        host: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum HookCmd {
     /// Install hook entries into the agent CLI's settings file
     Install {
         /// Which CLI to wire up
         #[arg(long, default_value = "claude")]
         cli: String,
+        /// Embed AGORA_HOST=<alias> in hook commands so agents report the
+        /// SSH alias rather than the machine's /etc/hostname. Used by
+        /// `agora remote install` automatically.
+        #[arg(long)]
+        host_alias: Option<String>,
     },
     /// Remove agora hook entries from the agent CLI's settings file
     Uninstall {
@@ -106,6 +133,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Manage remote hosts (SSH reverse-forward tunnels)
+    #[command(subcommand)]
+    Remote(RemoteCmd),
     /// Bind the focused niri workspace to an existing project
     Attach {
         /// Project name
@@ -253,9 +283,15 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Edit { name } => edit(name)?,
-        Cmd::Hook(HookCmd::Install { cli }) => hook_install(&cli)?,
+        Cmd::Hook(HookCmd::Install { cli, host_alias }) => {
+            hook_install(&cli, host_alias.as_deref())?
+        }
         Cmd::Hook(HookCmd::Uninstall { cli }) => hook_uninstall(&cli)?,
         Cmd::Hook(HookCmd::Event { event, cli }) => hook_event(&event, &cli)?,
+        Cmd::Remote(RemoteCmd::Add { host }) => remote_add(&host)?,
+        Cmd::Remote(RemoteCmd::Remove { host }) => remote_remove(&host)?,
+        Cmd::Remote(RemoteCmd::List { json }) => remote_list(json)?,
+        Cmd::Remote(RemoteCmd::Install { host }) => remote_install(&host)?,
         Cmd::Agents { json } => {
             let payload = call(Request::Agents)?;
             let Payload::Agents(agents) = payload else {
@@ -496,12 +532,23 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
     std::io::stdin()
         .read_to_string(&mut buf)
         .context("read stdin")?;
-    // Hooks may invoke us with empty stdin (e.g. quick test). Treat as null.
-    let payload: serde_json::Value = if buf.trim().is_empty() {
-        serde_json::Value::Null
+    // Hooks may invoke us with empty stdin (e.g. quick test). Treat as empty obj
+    // so we can still inject agora_host below.
+    let mut payload: serde_json::Value = if buf.trim().is_empty() {
+        serde_json::json!({})
     } else {
         serde_json::from_str(&buf).context("parse hook stdin as JSON")?
     };
+    // Stamp the host this hook is running on. Daemon uses it to tell local vs
+    // remote sessions apart. We use "agora_host" (not "hostname") to avoid
+    // colliding with any field claude code might add later.
+    if let Some(obj) = payload.as_object_mut() {
+        if !obj.contains_key("agora_host") {
+            if let Some(name) = read_hostname() {
+                obj.insert("agora_host".to_string(), serde_json::Value::String(name));
+            }
+        }
+    }
     // Fire-and-forget: send and don't fail the hook on daemon error.
     // Hook scripts must exit cleanly so the agent CLI keeps moving.
     if let Err(e) = call(Request::Hook {
@@ -512,6 +559,21 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
         eprintln!("agora hook: {e:#}");
     }
     Ok(())
+}
+
+fn read_hostname() -> Option<String> {
+    // Prefer AGORA_HOST env (set by hook commands installed via
+    // `agora hook install --host-alias X`). Falls back to /etc/hostname.
+    if let Ok(v) = std::env::var("AGORA_HOST") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// `~/.claude/settings.json` for claude. Codex path differs but the install
@@ -549,7 +611,7 @@ fn hook_events_for(cli: &str) -> &'static [(&'static str, bool)] {
     }
 }
 
-fn hook_install(cli: &str) -> Result<()> {
+fn hook_install(cli: &str, host_alias: Option<&str>) -> Result<()> {
     let path = hook_settings_path(cli)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -580,7 +642,11 @@ fn hook_install(cli: &str) -> Result<()> {
     }
     let hooks = hooks.as_object_mut().unwrap();
 
-    let cmd = format!("agora hook event --cli {cli} {{event}}"); // placeholder; replaced per-event
+    let prefix = match host_alias {
+        Some(alias) => format!("AGORA_HOST={alias} "),
+        None => String::new(),
+    };
+    let cmd = format!("{prefix}agora hook event --cli {cli} {{event}}"); // placeholder; replaced per-event
     let events = hook_events_for(cli);
     if events.is_empty() {
         anyhow::bail!("no hooks defined for cli '{cli}' yet");
@@ -695,6 +761,223 @@ fn hook_uninstall(cli: &str) -> Result<()> {
 /// Daemon's `fs::canonicalize` is relative to the daemon's cwd (often `/`),
 /// so resolve user-relative paths here before sending. Daemon still does its
 /// own canonicalize (symlinks, etc) afterwards.
+fn remote_add(host: &str) -> Result<()> {
+    if host.is_empty() {
+        bail!("host must not be empty");
+    }
+    let uid = ssh_query_uid(host)?;
+    let payload = call(Request::RemoteAdd {
+        host: host.to_string(),
+        remote_uid: uid,
+    })?;
+    let Payload::Remote(r) = payload else {
+        bail!("unexpected payload from daemon: {payload:?}");
+    };
+    println!(
+        "added remote: {} (remote_socket={}, status={:?})",
+        r.host.host, r.host.remote_socket, r.status
+    );
+    Ok(())
+}
+
+fn remote_remove(host: &str) -> Result<()> {
+    let payload = call(Request::RemoteRemove {
+        host: host.to_string(),
+    })?;
+    if !matches!(payload, Payload::Ack) {
+        bail!("unexpected payload from daemon: {payload:?}");
+    }
+    println!("removed remote: {host}");
+    Ok(())
+}
+
+fn remote_list(json: bool) -> Result<()> {
+    let payload = call(Request::RemoteList)?;
+    let Payload::Remotes(remotes) = payload else {
+        bail!("unexpected payload from daemon: {payload:?}");
+    };
+    if json {
+        serde_json::to_writer(std::io::stdout(), &remotes).context("serialize remotes")?;
+        println!();
+    } else if remotes.is_empty() {
+        println!("(no remotes)");
+    } else {
+        for r in remotes {
+            let status = match r.status {
+                agora::ipc::RemoteStatus::Connected => "connected",
+                agora::ipc::RemoteStatus::Connecting => "connecting",
+                agora::ipc::RemoteStatus::Disconnected => "disconnected",
+                agora::ipc::RemoteStatus::Failed => "failed",
+            };
+            let err = r
+                .last_error
+                .as_deref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
+            println!(
+                "{:20} status={status} sock={}{err}",
+                r.host.host, r.host.remote_socket
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ssh_query_uid(host: &str) -> Result<u32> {
+    let out = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg(host)
+        .arg("id -u")
+        .output()
+        .with_context(|| format!("run `ssh {host} id -u`"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("ssh {host} id -u failed: {}", err.trim());
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let trimmed = s.trim();
+    trimmed
+        .parse::<u32>()
+        .with_context(|| format!("remote returned non-numeric uid: {trimmed:?}"))
+}
+
+fn remote_install(host: &str) -> Result<()> {
+    if host.is_empty() {
+        bail!("host must not be empty");
+    }
+    // Local release binary — what we ship to the remote.
+    let local_bin = local_release_binary()?;
+    println!("local binary: {}", local_bin.display());
+
+    // 1. ssh probe: arch + uid (we'll need both)
+    let probe = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host])
+        .arg("uname -m && id -u")
+        .output()
+        .with_context(|| format!("ssh probe to {host}"))?;
+    if !probe.status.success() {
+        bail!(
+            "ssh probe failed: {}",
+            String::from_utf8_lossy(&probe.stderr).trim()
+        );
+    }
+    let probe_out = String::from_utf8_lossy(&probe.stdout);
+    let mut lines = probe_out.lines();
+    let arch = lines.next().unwrap_or("").trim().to_string();
+    let uid: u32 = lines
+        .next()
+        .unwrap_or("")
+        .trim()
+        .parse()
+        .with_context(|| format!("remote returned non-numeric uid: {probe_out:?}"))?;
+    println!("remote: arch={arch} uid={uid}");
+    if arch != "x86_64" {
+        bail!(
+            "remote arch '{arch}' is not x86_64; cross-arch install not yet supported"
+        );
+    }
+
+    // 2. ensure remote ~/.local/bin exists
+    let mk = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", host])
+        .arg("mkdir -p ~/.local/bin")
+        .status()
+        .context("ssh mkdir")?;
+    if !mk.success() {
+        bail!("remote mkdir ~/.local/bin failed");
+    }
+
+    // 3. scp the binary
+    println!("scp -> {host}:~/.local/bin/agora");
+    let scp = Command::new("scp")
+        .args(["-o", "BatchMode=yes"])
+        .arg(&local_bin)
+        .arg(format!("{host}:.local/bin/agora"))
+        .status()
+        .context("scp binary")?;
+    if !scp.success() {
+        bail!("scp failed");
+    }
+
+    // 4. chmod + sanity-check version
+    let verify = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", host])
+        .arg("chmod +x ~/.local/bin/agora && ~/.local/bin/agora --version")
+        .output()
+        .context("ssh verify")?;
+    if !verify.status.success() {
+        bail!(
+            "remote agora --version failed: {}",
+            String::from_utf8_lossy(&verify.stderr).trim()
+        );
+    }
+    println!(
+        "remote agora: {}",
+        String::from_utf8_lossy(&verify.stdout).trim()
+    );
+
+    // 5. install claude hooks on remote (with host alias so agents report SSH alias)
+    let hooks = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", host])
+        .arg(format!(
+            "~/.local/bin/agora hook install --host-alias {host}"
+        ))
+        .output()
+        .context("ssh hook install")?;
+    if !hooks.status.success() {
+        bail!(
+            "remote hook install failed: {}",
+            String::from_utf8_lossy(&hooks.stderr).trim()
+        );
+    }
+    println!("hook install: {}", String::from_utf8_lossy(&hooks.stdout).trim());
+
+    // 6. register the host with the local daemon (idempotent: re-add updates)
+    let payload = call(Request::RemoteAdd {
+        host: host.to_string(),
+        remote_uid: uid,
+    })?;
+    let Payload::Remote(r) = payload else {
+        bail!("unexpected payload from daemon: {payload:?}");
+    };
+    println!(
+        "registered: {} (remote_socket={}, status={:?})",
+        r.host.host, r.host.remote_socket, r.status
+    );
+    Ok(())
+}
+
+fn local_release_binary() -> Result<std::path::PathBuf> {
+    // Search from the current cwd upward for target/release/agora.
+    // Defaults to whichever cwd we're invoked from (likely the user's project).
+    let exe = std::env::current_exe().context("read current_exe")?;
+    // exe is at .../target/release/agora — we're already that.
+    if exe.ends_with("target/release/agora") || exe.ends_with("target/x86_64-unknown-linux-gnu/release/agora") {
+        return Ok(exe);
+    }
+    // Try ~/.cargo or PATH-resolved binary's path. As fallback look at $AGORA_BIN.
+    if let Ok(p) = std::env::var("AGORA_BIN") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return Ok(pb);
+        }
+    }
+    // Last resort: which agora
+    let out = Command::new("which").arg("agora").output().ok();
+    if let Some(o) = out {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Ok(std::path::PathBuf::from(s));
+            }
+        }
+    }
+    bail!("could not locate agora release binary; set AGORA_BIN=/path/to/agora")
+}
+
 fn resolve_local_path(path: &str) -> Result<String> {
     let p = std::path::Path::new(path);
     if p.is_absolute() {

@@ -98,6 +98,26 @@ impl Launcher {
     }
 }
 
+/// A host the daemon keeps an SSH reverse-forward tunnel to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteHost {
+    /// SSH alias / hostname. Resolved via the user's ~/.ssh/config.
+    pub host: String,
+    /// Remote-side socket path. Filled at `remote add` time by `ssh host id -u`.
+    pub remote_socket: String,
+    /// Optional override of the remote agora binary path. Defaults to
+    /// `~/.local/bin/agora` resolved via the remote shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_agora_path: Option<String>,
+    /// Whether daemon should auto-bring-up the tunnel on startup.
+    #[serde(default = "default_true")]
+    pub auto_connect: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Which CLI agent this session belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,4 +159,9 @@ pub struct AgentSession {
     /// Always None inside the daemon's in-memory map; only filled for clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Hostname reported by the hook adapter. Local sessions report the local
+    /// hostname; remote sessions (via SSH reverse forward) report their own.
+    /// Empty / None when adapter didn't include it (older clients).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
