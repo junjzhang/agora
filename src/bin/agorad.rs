@@ -400,13 +400,59 @@ fn focus_agent(state: &State, session_id: &str) -> Result<()> {
         (Some(a), Some(l)) if a == l => false,
         _ => true,
     };
+
     if is_remote {
+        // Remote agent: focus the project workspace (which likely has the SSH
+        // terminal), or find a window whose title contains the host.
+        let agent = state.lock().unwrap().agents.get(session_id).cloned();
+        let agent = agent.ok_or_else(|| anyhow::anyhow!("agent gone"))?;
+        let project = agent
+            .cwd
+            .as_deref()
+            .and_then(|c| match_cwd_to_project(c, agent_host.as_deref(), &state.lock().unwrap().projects));
+
+        if let Some(proj_id) = project {
+            let ws_name = state
+                .lock()
+                .unwrap()
+                .projects
+                .iter()
+                .find(|p| p.id == proj_id)
+                .map(|p| p.workspace_name.clone());
+            if let Some(name) = ws_name {
+                let action = NiriAction::FocusWorkspace {
+                    reference: WorkspaceReferenceArg::Name(name),
+                };
+                if let Ok(NiriResponse::Handled) = niri_call(NiriRequest::Action(action)) {
+                    return Ok(());
+                }
+            }
+        }
+        // Fallback: search window titles for the host name.
+        let host_str = agent_host.as_deref().unwrap_or("");
+        let window_id = {
+            let inner = state.lock().unwrap();
+            inner.claims.iter().find_map(|(wid, c)| {
+                c.title
+                    .as_deref()
+                    .filter(|t| t.contains(host_str))
+                    .map(|_| *wid)
+            })
+        };
+        if let Some(wid) = window_id {
+            let action = NiriAction::FocusWindow { id: wid };
+            match niri_call(NiriRequest::Action(action))? {
+                NiriResponse::Handled => return Ok(()),
+                other => bail!("unexpected niri response: {other:?}"),
+            }
+        }
         bail!(
-            "agent '{session_id}' is remote (host={}); SSH to that host to interact",
-            agent_host.as_deref().unwrap_or("?")
+            "remote agent (host={}); no matching workspace or window found",
+            host_str
         );
     }
 
+    // Local agent: walk PID tree to find the terminal window.
     let pid = agent_pid.ok_or_else(|| {
         anyhow::anyhow!("agent '{session_id}' has no PID; started before hooks were installed?")
     })?;
