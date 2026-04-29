@@ -136,6 +136,8 @@ pub enum AgentPhase {
     Running,
     /// Agent emitted a Notification — almost always means it wants attention.
     WaitingInput,
+    /// A tool needs user approval before it can proceed.
+    WaitingPermission,
 }
 
 /// One agent session as the daemon tracks it. Keyed by `session_id`.

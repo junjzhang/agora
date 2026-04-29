@@ -249,6 +249,7 @@ fn agents(state: &State) -> Vec<AgentSession> {
 
 fn priority(phase: AgentPhase) -> u8 {
     match phase {
+        AgentPhase::WaitingPermission => 3,
         AgentPhase::WaitingInput => 2,
         AgentPhase::Running => 1,
         AgentPhase::Idle => 0,
@@ -1219,8 +1220,9 @@ fn apply_hook_inner(
         "SessionStart" => AgentPhase::Idle,
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PreCompact" => AgentPhase::Running,
         "Notification" => AgentPhase::WaitingInput,
+        "PermissionRequest" => AgentPhase::WaitingPermission,
         "Stop" | "SubagentStop" => AgentPhase::Idle,
-        _ => entry.phase, // unknown: keep current
+        _ => entry.phase,
     };
 
     if let Some(msg) = message {

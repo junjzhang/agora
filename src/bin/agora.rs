@@ -319,6 +319,7 @@ fn main() -> Result<()> {
                         agora::model::AgentPhase::Idle => "idle",
                         agora::model::AgentPhase::Running => "running",
                         agora::model::AgentPhase::WaitingInput => "waiting-input",
+                        agora::model::AgentPhase::WaitingPermission => "waiting-permission",
                     };
                     let proj = a.project.as_deref().unwrap_or("-");
                     let msg = a
@@ -437,6 +438,7 @@ fn main() -> Result<()> {
                         agora::model::AgentPhase::Idle => "idle",
                         agora::model::AgentPhase::Running => "running",
                         agora::model::AgentPhase::WaitingInput => "waiting-input",
+                        agora::model::AgentPhase::WaitingPermission => "waiting-permission",
                     };
                     let msg = a
                         .last_message
@@ -622,11 +624,11 @@ fn hook_events_for(cli: &str) -> &'static [(&'static str, bool)] {
             ("UserPromptSubmit", false),
             ("PreToolUse", true),
             ("PostToolUse", true),
+            ("PermissionRequest", true),
             ("Notification", true),
             ("Stop", false),
             ("SubagentStop", false),
         ],
-        // Codex hook surface is different; left empty for now.
         _ => &[],
     }
 }
