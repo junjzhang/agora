@@ -161,7 +161,10 @@ pub struct AgentSession {
     pub project: Option<String>,
     /// Hostname reported by the hook adapter. Local sessions report the local
     /// hostname; remote sessions (via SSH reverse forward) report their own.
-    /// Empty / None when adapter didn't include it (older clients).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// PID of the process that invoked the hook (typically claude's fork).
+    /// Daemon walks up the process tree to find the enclosing terminal window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
 }

@@ -208,6 +208,10 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             Ok(Payload::Ack)
         }
         Request::RemoteList => Ok(Payload::Remotes(remote_list(state))),
+        Request::FocusAgent { session_id } => {
+            focus_agent(state, &session_id)?;
+            Ok(Payload::Ack)
+        }
     }
 }
 
@@ -380,6 +384,74 @@ fn remote_summary(state: &State, host_name: &str) -> RemoteSummary {
 
 /// Spawn a thread that keeps `ssh -N -R` alive for a remote, with exponential
 /// backoff on failure. Replaces any existing tunnel for the same host.
+fn focus_agent(state: &State, session_id: &str) -> Result<()> {
+    let (agent_pid, agent_host) = {
+        let inner = state.lock().unwrap();
+        let agent = inner
+            .agents
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("no agent session '{session_id}'"))?;
+        (agent.pid, agent.host.clone())
+    };
+
+    let local_host = read_local_hostname();
+    let is_remote = match (agent_host.as_deref(), local_host.as_deref()) {
+        (None, _) => false,
+        (Some(a), Some(l)) if a == l => false,
+        _ => true,
+    };
+    if is_remote {
+        bail!(
+            "agent '{session_id}' is remote (host={}); SSH to that host to interact",
+            agent_host.as_deref().unwrap_or("?")
+        );
+    }
+
+    let pid = agent_pid.ok_or_else(|| {
+        anyhow::anyhow!("agent '{session_id}' has no PID; started before hooks were installed?")
+    })?;
+
+    let window_id = {
+        let inner = state.lock().unwrap();
+        find_window_for_pid(&inner.claims, pid)
+    };
+    let window_id = window_id.ok_or_else(|| {
+        anyhow::anyhow!("no niri window found for agent pid {pid} (session '{session_id}')")
+    })?;
+
+    let action = NiriAction::FocusWindow { id: window_id };
+    match niri_call(NiriRequest::Action(action))? {
+        NiriResponse::Handled => {}
+        other => bail!("unexpected niri response to FocusWindow: {other:?}"),
+    }
+    Ok(())
+}
+
+/// Walk up the process tree from `start_pid`, checking each PID against
+/// known niri window PIDs. Returns the window_id of the first match.
+fn find_window_for_pid(claims: &HashMap<u64, Claim>, start_pid: i32) -> Option<u64> {
+    let mut pid = start_pid;
+    for _ in 0..30 {
+        for (wid, claim) in claims {
+            if claim.pid == Some(pid) {
+                return Some(*wid);
+            }
+        }
+        // Read PPid from /proc
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let ppid: i32 = status
+            .lines()
+            .find(|l| l.starts_with("PPid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())?;
+        if ppid <= 1 {
+            break;
+        }
+        pid = ppid;
+    }
+    None
+}
+
 fn start_tunnel(state: &State, host: RemoteHost) {
     // Tear down any prior tunnel for this host.
     let prev = state.lock().unwrap().tunnels.remove(&host.host);
@@ -1023,12 +1095,14 @@ fn apply_hook_inner(
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(String::from);
-    // Adapters MAY include "agora_host" — set by `agora hook event` from the
-    // local gethostname(). Lets us tell remote sessions apart from local ones.
     let host = payload
         .get("agora_host")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let pid = payload
+        .get("agora_pid")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| i32::try_from(v).ok());
 
     // Notification message: a short reason the agent wants attention.
     let message = if event == "Notification" {
@@ -1070,15 +1144,18 @@ fn apply_hook_inner(
             last_change: now,
             project: None,
             host: host.clone(),
+            pid,
         }
     });
 
-    // Refresh fields that any event tells us about.
     if cwd.is_some() {
         entry.cwd = cwd;
     }
     if host.is_some() {
         entry.host = host;
+    }
+    if pid.is_some() {
+        entry.pid = pid;
     }
     entry.last_event = Some(event.to_string());
 

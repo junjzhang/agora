@@ -133,6 +133,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Focus the terminal window containing an agent session
+    FocusAgent {
+        /// Agent session id (from `agora agents`)
+        session_id: String,
+    },
     /// Manage remote hosts (SSH reverse-forward tunnels)
     #[command(subcommand)]
     Remote(RemoteCmd),
@@ -288,6 +293,12 @@ fn main() -> Result<()> {
         }
         Cmd::Hook(HookCmd::Uninstall { cli }) => hook_uninstall(&cli)?,
         Cmd::Hook(HookCmd::Event { event, cli }) => hook_event(&event, &cli)?,
+        Cmd::FocusAgent { session_id } => {
+            let payload = call(Request::FocusAgent { session_id })?;
+            if !matches!(payload, Payload::Ack) {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            }
+        }
         Cmd::Remote(RemoteCmd::Add { host }) => remote_add(&host)?,
         Cmd::Remote(RemoteCmd::Remove { host }) => remote_remove(&host)?,
         Cmd::Remote(RemoteCmd::List { json }) => remote_list(json)?,
@@ -539,13 +550,22 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
     } else {
         serde_json::from_str(&buf).context("parse hook stdin as JSON")?
     };
-    // Stamp the host this hook is running on. Daemon uses it to tell local vs
-    // remote sessions apart. We use "agora_host" (not "hostname") to avoid
-    // colliding with any field claude code might add later.
     if let Some(obj) = payload.as_object_mut() {
+        // Host this hook is running on.
         if !obj.contains_key("agora_host") {
             if let Some(name) = read_hostname() {
                 obj.insert("agora_host".to_string(), serde_json::Value::String(name));
+            }
+        }
+        // PID of the process that invoked the hook (claude's fork). Daemon
+        // walks up the process tree from here to find the terminal window.
+        if !obj.contains_key("agora_pid") {
+            let ppid = unsafe { libc::getppid() };
+            if ppid > 1 {
+                obj.insert(
+                    "agora_pid".to_string(),
+                    serde_json::Value::Number(ppid.into()),
+                );
             }
         }
     }

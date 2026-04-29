@@ -113,6 +113,11 @@ pub enum Request {
         host: String,
     },
     RemoteList,
+    /// Focus the niri window containing an agent session (by walking its PID's
+    /// process tree to find the enclosing terminal window).
+    FocusAgent {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
