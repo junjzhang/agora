@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AgentSession, Launcher, Project, ProjectSpec, RemoteHost};
+use crate::model::{AgentSession, Project, ProjectSpec, RemoteHost};
 
 pub fn socket_path() -> Result<PathBuf> {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -43,7 +43,7 @@ pub enum Request {
         #[serde(default)]
         host: Option<String>,
         #[serde(default)]
-        launchers: Vec<Launcher>,
+        launchers: Vec<String>,
     },
     List,
     Open {
@@ -74,7 +74,7 @@ pub enum Request {
         root_path: String,
         host: Option<String>,
         #[serde(default)]
-        launchers: Vec<Launcher>,
+        launchers: Vec<String>,
         /// If the focused ws is already named differently from the resolved id,
         /// rename the ws to match instead of erroring.
         #[serde(default)]

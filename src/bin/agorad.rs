@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -18,11 +18,10 @@ use niri_ipc::{
     Action as NiriAction, Event, Reply, Request as NiriRequest, Response as NiriResponse, Window,
     Workspace, WorkspaceReferenceArg,
 };
+use serde::{Deserialize, Serialize};
 
 use agora::ipc::{self, Payload, Request, RemoteStatus, RemoteSummary, Response, WindowSummary};
-use agora::model::{
-    AgentCli, AgentPhase, AgentSession, Launcher, Project, ProjectSpec, RemoteHost, Root,
-};
+use agora::model::{AgentCli, AgentPhase, AgentSession, Project, ProjectSpec, RemoteHost, Root};
 use agora::store;
 
 #[derive(Default)]
@@ -38,6 +37,10 @@ struct Inner {
     remotes: Vec<RemoteHost>,
     /// Live tunnel state per host (in-memory only).
     tunnels: HashMap<String, TunnelState>,
+    /// Launcher command templates keyed by launcher name.
+    launcher_registry: LauncherRegistry,
+    /// Runtime config loaded from file plus env overrides.
+    config: AgoraConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +68,21 @@ struct Claim {
 }
 
 type State = Arc<Mutex<Inner>>;
+type LauncherRegistry = HashMap<String, LauncherTemplate>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LauncherTemplate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<Vec<String>>,
+}
+
+#[derive(Default, Deserialize)]
+struct AgoraConfig {
+    #[serde(default)]
+    cleanup_all_workspaces: bool,
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -83,6 +101,17 @@ fn main() -> Result<()> {
     );
     let remotes = store::load_remotes().context("load remotes store")?;
     tracing::info!(count = remotes.len(), "loaded remotes");
+    let (launcher_registry, user_launcher_overrides) =
+        load_launcher_registry().context("load launcher registry")?;
+    let mut config = load_config().context("load config")?;
+    if let Ok(v) = std::env::var("AGORA_CLEANUP_ALL_WS") {
+        config.cleanup_all_workspaces = v == "1" || v.eq_ignore_ascii_case("true");
+    }
+    tracing::info!(
+        user_launcher_overrides,
+        cleanup_all_workspaces = config.cleanup_all_workspaces,
+        "loaded agora config",
+    );
     let state: State = Arc::new(Mutex::new(Inner {
         projects,
         claims: HashMap::new(),
@@ -90,6 +119,8 @@ fn main() -> Result<()> {
         agents: HashMap::new(),
         remotes: remotes.clone(),
         tunnels: HashMap::new(),
+        launcher_registry,
+        config,
     }));
 
     // Bring up tunnels for any remote with auto_connect = true.
@@ -116,6 +147,181 @@ fn main() -> Result<()> {
     tracing::info!(path = %path.display(), "socket listening");
 
     serve_socket(listener, state)
+}
+
+fn config_dir() -> Result<PathBuf> {
+    if let Some(d) = std::env::var_os("XDG_CONFIG_HOME") {
+        if !d.is_empty() {
+            return Ok(PathBuf::from(d).join("agora"));
+        }
+    }
+    let home = std::env::var_os("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join(".config/agora"))
+}
+
+fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.json"))
+}
+
+fn launcher_overrides_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("launchers.json"))
+}
+
+fn load_config() -> Result<AgoraConfig> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(AgoraConfig::default());
+    }
+
+    let buf = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    match serde_json::from_str(&buf) {
+        Ok(config) => Ok(config),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to parse config.json; using defaults"
+            );
+            Ok(AgoraConfig::default())
+        }
+    }
+}
+
+fn load_launcher_registry() -> Result<(LauncherRegistry, usize)> {
+    let mut registry = default_launcher_registry();
+    let path = launcher_overrides_path()?;
+    if !path.exists() {
+        return Ok((registry, 0));
+    }
+
+    let buf = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let overrides: LauncherRegistry = match serde_json::from_str(&buf) {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to parse launchers.json; using defaults only"
+            );
+            return Ok((registry, 0));
+        }
+    };
+    let count = overrides.len();
+    registry.extend(overrides);
+    Ok((registry, count))
+}
+
+fn default_launcher_registry() -> LauncherRegistry {
+    let mut registry = LauncherRegistry::new();
+    registry.insert(
+        "terminal".into(),
+        LauncherTemplate {
+            local: Some(vec!["kitty", "--directory", "{path}"].into_iter().map(str::to_string).collect()),
+            remote: Some(
+                vec![
+                    "kitty",
+                    "+kitten",
+                    "ssh",
+                    "-R",
+                    "7897:127.0.0.1:7890",
+                    "{host}",
+                    "-t",
+                    "cd {path}; exec /usr/bin/zsh",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+        },
+    );
+    registry.insert(
+        "claude".into(),
+        LauncherTemplate {
+            local: Some(
+                vec![
+                    "kitty",
+                    "--directory",
+                    "{path}",
+                    "--",
+                    "zsh",
+                    "-ic",
+                    "claude; exec zsh",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            remote: Some(
+                vec![
+                    "kitty",
+                    "+kitten",
+                    "ssh",
+                    "-R",
+                    "7897:127.0.0.1:7890",
+                    "{host}",
+                    "-t",
+                    "cd {path}; claude; exec /usr/bin/zsh",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+        },
+    );
+    registry.insert(
+        "codex".into(),
+        LauncherTemplate {
+            local: Some(
+                vec![
+                    "kitty",
+                    "--directory",
+                    "{path}",
+                    "--",
+                    "zsh",
+                    "-ic",
+                    "codex; exec zsh",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            remote: Some(
+                vec![
+                    "kitty",
+                    "+kitten",
+                    "ssh",
+                    "-R",
+                    "7897:127.0.0.1:7890",
+                    "{host}",
+                    "-t",
+                    "cd {path}; codex; exec /usr/bin/zsh",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+        },
+    );
+    registry.insert(
+        "vscode".into(),
+        LauncherTemplate {
+            local: Some(vec!["code", "{path}"].into_iter().map(str::to_string).collect()),
+            remote: Some(
+                vec!["code", "--folder-uri", "vscode-remote://ssh-remote+{host}{path}"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+        },
+    );
+    registry.insert(
+        "zed".into(),
+        LauncherTemplate {
+            local: Some(vec!["zed", "{path}"].into_iter().map(str::to_string).collect()),
+            remote: None,
+        },
+    );
+    registry
 }
 
 fn bind_socket(path: &Path) -> Result<UnixListener> {
@@ -403,10 +609,35 @@ fn focus_agent(state: &State, session_id: &str) -> Result<()> {
     };
 
     if is_remote {
+        // Remote agent: focus the project's workspace instead of hunting for
+        // a specific window — there may be multiple SSH terminals to the same
+        // host and we can't reliably distinguish them.
+        let ws_name = {
+            let inner = state.lock().unwrap();
+            let agent = inner.agents.get(session_id);
+            let project_id = agent.and_then(|a| a.project.clone()).or_else(|| {
+                let a = agent?;
+                match_cwd_to_project(a.cwd.as_deref()?, a.host.as_deref(), &inner.projects)
+            });
+            project_id.and_then(|pid| {
+                inner
+                    .projects
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .map(|p| p.workspace_name.clone())
+            })
+        };
+        if let Some(name) = ws_name {
+            let action = NiriAction::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Name(name),
+            };
+            match niri_call(NiriRequest::Action(action))? {
+                NiriResponse::Handled => return Ok(()),
+                other => bail!("unexpected niri response: {other:?}"),
+            }
+        }
+        // Fallback: try to find any window SSH'd to that host.
         let host_str = agent_host.as_deref().unwrap_or("");
-        // Find the local kitty window whose process tree contains an ssh
-        // session to the agent's host — that's the terminal the user
-        // interacts with.
         let window_id = {
             let inner = state.lock().unwrap();
             find_window_with_ssh_to(&inner.claims, host_str)
@@ -419,7 +650,7 @@ fn focus_agent(state: &State, session_id: &str) -> Result<()> {
             }
         }
         bail!(
-            "remote agent (host={}); no local terminal with SSH to that host found",
+            "remote agent (host={}); no workspace or terminal found",
             host_str
         );
     }
@@ -466,6 +697,82 @@ fn find_window_for_pid(claims: &HashMap<u64, Claim>, start_pid: i32) -> Option<u
             break;
         }
         pid = ppid;
+    }
+    None
+}
+
+/// Query kitty remote control for a window's cwd. Finds the kitty socket
+/// for the given PID and asks for the foreground process's cwd.
+fn get_kitty_window_cwd(kitty_pid: i32) -> Option<String> {
+    let sock = format!("unix:/tmp/kitty-{kitty_pid}");
+    let output = std::process::Command::new("kitty")
+        .args(["@", "--to", &sock, "ls"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    // kitty @ ls returns [{tabs: [{windows: [{pid, cwd, is_focused, ...}]}]}]
+    for os_win in data.as_array()? {
+        for tab in os_win.get("tabs")?.as_array()? {
+            for win in tab.get("windows")?.as_array()? {
+                if win.get("is_focused")?.as_bool() == Some(true) {
+                    return win.get("cwd")?.as_str().map(String::from);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Walk down the process tree to the deepest single child. Terminals (kitty)
+/// spawn a shell whose cwd is the user's working directory; the terminal
+/// process itself sits at `/`.
+fn find_leaf_child(mut pid: i32) -> i32 {
+    for _ in 0..20 {
+        let Ok(children_str) =
+            fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        else {
+            break;
+        };
+        let children: Vec<i32> = children_str
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if children.len() != 1 {
+            break;
+        }
+        pid = children[0];
+    }
+    pid
+}
+
+/// Find the SSH host a terminal is connected to by walking its process tree.
+fn find_ssh_host_in_children(pid: i32) -> Option<String> {
+    find_ssh_host_recursive(pid, 0)
+}
+
+fn find_ssh_host_recursive(pid: i32, depth: u32) -> Option<String> {
+    if depth > 10 {
+        return None;
+    }
+    let children_str = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+    for child_str in children_str.split_whitespace() {
+        let Some(child) = child_str.parse::<i32>().ok() else { continue };
+        let Ok(cmdline) = fs::read_to_string(format!("/proc/{child}/cmdline")) else { continue };
+        let args: Vec<&str> = cmdline.split('\0').filter(|s| !s.is_empty()).collect();
+        let bin = args.first().copied().unwrap_or("");
+        // Match `ssh` or `kitten ssh` (not `kitten __atexit__` etc.)
+        let is_ssh = bin.ends_with("ssh")
+            || (bin.ends_with("kitten") && args.get(1).copied() == Some("ssh"));
+        if is_ssh {
+            // Host is the last positional arg (not a flag, not a port forward value).
+            return args.iter().rev().find(|a| !a.starts_with('-') && !a.contains(':')).map(|s| s.to_string());
+        }
+        if let Some(host) = find_ssh_host_recursive(child, depth + 1) {
+            return Some(host);
+        }
     }
     None
 }
@@ -696,7 +1003,7 @@ fn add(
     name: String,
     root_path: String,
     host: Option<String>,
-    launchers: Vec<Launcher>,
+    launchers: Vec<String>,
 ) -> Result<Project> {
     if name.is_empty() {
         bail!("project name must not be empty");
@@ -890,7 +1197,7 @@ fn promote(
     name_arg: Option<String>,
     root_path: String,
     host: Option<String>,
-    launchers: Vec<Launcher>,
+    launchers: Vec<String>,
     rename_ws: bool,
 ) -> Result<Project> {
     // 1. Find the focused niri workspace.
@@ -903,18 +1210,94 @@ fn promote(
         .find(|w| w.is_focused)
         .ok_or_else(|| anyhow::anyhow!("no focused niri workspace"))?;
 
-    // 2. Resolve the root path (local: stat; remote: pass-through).
-    let resolved_path = match host.as_deref() {
+    // 2. Resolve the root path. Empty root_path → infer from focused window's cwd.
+    //    Also auto-detect host from SSH terminals.
+    let (effective_root, detected_host) = if root_path.is_empty() {
+        let inner = state.lock().unwrap();
+        let focused_ws_id = focused.id;
+        let active_id = focused.active_window_id;
+        let ws_claims: Vec<_> = inner
+            .claims
+            .iter()
+            .filter(|(_, c)| c.workspace_id == Some(focused_ws_id))
+            .collect();
+        // Find best terminal PID.
+        let term_pid = active_id
+            .and_then(|aid| ws_claims.iter().find(|(id, _)| **id == aid))
+            .filter(|(_, c)| c.app_id.as_deref() == Some("kitty"))
+            .and_then(|(_, c)| c.pid)
+            .or_else(|| {
+                ws_claims
+                    .iter()
+                    .find(|(_, c)| c.app_id.as_deref() == Some("kitty"))
+                    .and_then(|(_, c)| c.pid)
+            });
+        drop(inner);
+
+        if let Some(pid) = term_pid {
+            if let Some(ssh_host) = find_ssh_host_in_children(pid) {
+                // Remote workspace: find cwd from agent sessions on this host.
+                let remote_cwd = {
+                    let inner = state.lock().unwrap();
+                    inner
+                        .agents
+                        .values()
+                        .filter(|a| a.host.as_deref() == Some(&ssh_host))
+                        .filter_map(|a| a.cwd.as_deref())
+                        .max_by_key(|cwd| cwd.len())
+                        .map(String::from)
+                };
+                match remote_cwd {
+                    Some(cwd) if !cwd.is_empty() => (cwd, Some(ssh_host)),
+                    _ => bail!(
+                        "detected SSH to {ssh_host} but no agent session with a cwd on that host; \
+                         start a claude session there first, or pass a root path explicitly"
+                    ),
+                }
+            } else {
+                let leaf = find_leaf_child(pid);
+                let cwd = std::fs::read_link(format!("/proc/{leaf}/cwd"))
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .ok_or_else(|| anyhow::anyhow!("cannot read cwd of pid {leaf}"))?;
+                (cwd, None)
+            }
+        } else {
+            // Try any window with a pid as last resort.
+            let fallback_pid = {
+                let inner = state.lock().unwrap();
+                inner
+                    .claims
+                    .values()
+                    .filter(|c| c.workspace_id == Some(focused_ws_id))
+                    .find_map(|c| c.pid)
+            };
+            let cwd = fallback_pid
+                .and_then(|p| {
+                    let leaf = find_leaf_child(p);
+                    std::fs::read_link(format!("/proc/{leaf}/cwd"))
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                })
+                .ok_or_else(|| anyhow::anyhow!("no window cwd found on focused workspace"))?;
+            (cwd, None)
+        }
+    } else {
+        (root_path.clone(), None)
+    };
+    // Merge detected host with explicit --host (explicit wins).
+    let effective_host = host.or(detected_host);
+    let resolved_path = match effective_host.as_deref() {
         Some("") => bail!("--host is empty; omit it for local"),
         Some(_) => {
-            if root_path.is_empty() {
+            if effective_root.is_empty() {
                 bail!("root path must not be empty");
             }
-            root_path.clone()
+            effective_root
         }
         None => {
-            let resolved = fs::canonicalize(&root_path)
-                .with_context(|| format!("resolve root path {root_path}"))?;
+            let resolved = fs::canonicalize(&effective_root)
+                .with_context(|| format!("resolve root path {effective_root}"))?;
             let meta = fs::metadata(&resolved)
                 .with_context(|| format!("stat {}", resolved.display()))?;
             if !meta.is_dir() {
@@ -997,7 +1380,7 @@ fn promote(
         workspace_name: derived.clone(),
         roots: vec![Root {
             path: resolved_path,
-            host,
+            host: effective_host,
             label: None,
             launchers,
         }],
@@ -1160,6 +1543,10 @@ fn apply_hook_inner(
         .get("agora_pid")
         .and_then(|v| v.as_i64())
         .and_then(|v| i32::try_from(v).ok());
+    let slug = payload
+        .get("agora_slug")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // Notification message: a short reason the agent wants attention.
     let message = if event == "Notification" {
@@ -1170,6 +1557,22 @@ fn apply_hook_inner(
                 let trimmed = s.trim();
                 if trimmed.len() > 200 {
                     format!("{}…", &trimmed[..200])
+                } else {
+                    trimmed.to_string()
+                }
+            })
+    } else {
+        None
+    };
+
+    let prompt = if event == "UserPromptSubmit" {
+        payload
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.len() > 120 {
+                    format!("{}…", &trimmed[..120])
                 } else {
                     trimmed.to_string()
                 }
@@ -1198,6 +1601,8 @@ fn apply_hook_inner(
             cwd: cwd.clone(),
             last_event: None,
             last_message: None,
+            last_prompt: None,
+            slug: slug.clone(),
             last_change: now,
             project: None,
             host: host.clone(),
@@ -1214,6 +1619,9 @@ fn apply_hook_inner(
     if pid.is_some() {
         entry.pid = pid;
     }
+    if slug.is_some() {
+        entry.slug = slug;
+    }
     entry.last_event = Some(event.to_string());
 
     let new_phase = match event {
@@ -1229,6 +1637,9 @@ fn apply_hook_inner(
         entry.last_message = Some(msg);
     } else if event == "UserPromptSubmit" {
         entry.last_message = None;
+    }
+    if let Some(p) = prompt {
+        entry.last_prompt = Some(p);
     }
 
     if entry.phase != new_phase {
@@ -1321,10 +1732,10 @@ fn open(state: &State, name: String) -> Result<Payload> {
         other => bail!("unexpected niri response to Workspaces: {other:?}"),
     };
 
-    // Existing project workspace? Just focus it.
-    if workspaces
+    // Existing project workspace? Focus it, spawn launchers if empty.
+    if let Some(ws) = workspaces
         .iter()
-        .any(|w| w.name.as_deref() == Some(project.workspace_name.as_str()))
+        .find(|w| w.name.as_deref() == Some(project.workspace_name.as_str()))
     {
         let action = NiriAction::FocusWorkspace {
             reference: WorkspaceReferenceArg::Name(project.workspace_name.clone()),
@@ -1332,6 +1743,14 @@ fn open(state: &State, name: String) -> Result<Payload> {
         match niri_call(NiriRequest::Action(action))? {
             NiriResponse::Handled => {}
             other => bail!("unexpected niri response to Action: {other:?}"),
+        }
+
+        let ws_empty = {
+            let inner = state.lock().unwrap();
+            !inner.claims.values().any(|c| c.workspace_id == Some(ws.id))
+        };
+        if ws_empty {
+            spawn_launchers(state, &project);
         }
 
         bump_last_active(state, &name)?;
@@ -1367,7 +1786,7 @@ fn open(state: &State, name: String) -> Result<Payload> {
         other => bail!("unexpected niri response to SetWorkspaceName: {other:?}"),
     }
 
-    spawn_launchers(&project);
+    spawn_launchers(state, &project);
     bump_last_active(state, &name)?;
 
     Ok(Payload::Opened {
@@ -1412,21 +1831,23 @@ fn bump_last_active(state: &State, name: &str) -> Result<()> {
     store::save(&inner.projects).context("save project store")
 }
 
-fn spawn_launchers(project: &Project) {
+fn spawn_launchers(state: &State, project: &Project) {
     let Some(root) = project.roots.get(project.default_root) else {
         tracing::warn!(project = %project.id, "default_root index out of range");
         return;
     };
+    let registry = { state.lock().unwrap().launcher_registry.clone() };
     if root.launchers.is_empty() {
+        spawn_one("terminal", root, &registry);
         return;
     }
     for launcher in &root.launchers {
-        spawn_one(launcher, root);
+        spawn_one(launcher, root, &registry);
     }
 }
 
-fn spawn_one(launcher: &Launcher, root: &Root) {
-    let Some(mut cmd) = launcher_command(launcher, root) else {
+fn spawn_one(launcher: &str, root: &Root, registry: &LauncherRegistry) {
+    let Some(mut cmd) = launcher_command(launcher, root, registry) else {
         return; // a warn was already logged
     };
     // For local roots, set cwd so the spawned process inherits it.
@@ -1441,7 +1862,7 @@ fn spawn_one(launcher: &Launcher, root: &Root) {
         Ok(child) => {
             let pid = child.id();
             tracing::info!(
-                kind = launcher.kind(),
+                launcher,
                 pid,
                 host = root.host.as_deref().unwrap_or("local"),
                 path = %root.path,
@@ -1454,7 +1875,7 @@ fn spawn_one(launcher: &Launcher, root: &Root) {
         }
         Err(e) => {
             tracing::warn!(
-                kind = launcher.kind(),
+                launcher,
                 error = %e,
                 "spawn failed",
             );
@@ -1462,94 +1883,57 @@ fn spawn_one(launcher: &Launcher, root: &Root) {
     }
 }
 
-fn launcher_command(launcher: &Launcher, root: &Root) -> Option<Command> {
-    let host = root.host.as_deref();
-    let path = root.path.as_str();
-    match launcher {
-        Launcher::Vscode => {
-            let mut c = Command::new("code");
-            match host {
-                Some(h) => {
-                    c.arg("--folder-uri")
-                        .arg(format!("vscode-remote://ssh-remote+{h}{path}"));
-                }
-                None => {
-                    c.arg(path);
-                }
-            }
-            Some(c)
-        }
-        Launcher::Zed => {
-            if host.is_some() {
+fn launcher_command(launcher: &str, root: &Root, registry: &LauncherRegistry) -> Option<Command> {
+    let Some(template) = registry.get(launcher) else {
+        tracing::warn!(launcher, "unknown launcher; skipping");
+        return None;
+    };
+    let argv = match root.host.as_deref() {
+        Some(host) => {
+            let Some(remote) = template.remote.as_ref() else {
                 tracing::warn!(
-                    host = host.unwrap_or(""),
-                    "zed remote not supported; skipping"
+                    launcher,
+                    host,
+                    path = %root.path,
+                    "launcher has no remote template; skipping"
                 );
                 return None;
-            }
-            let mut c = Command::new("zed");
-            c.arg(path);
-            Some(c)
-        }
-        Launcher::Kitty { run } => Some(kitty_command(host, path, run.as_deref())),
-        Launcher::Claude => Some(kitty_command(host, path, Some("claude"))),
-        Launcher::Codex => Some(kitty_command(host, path, Some("codex"))),
-        Launcher::Browser { url } => {
-            let mut c = Command::new("xdg-open");
-            c.arg(url);
-            Some(c)
-        }
-        Launcher::Custom { argv } => {
-            let mut iter = argv.iter();
-            let head = iter.next().map(String::as_str).unwrap_or("true");
-            let mut c = Command::new(head);
-            c.args(iter);
-            Some(c)
-        }
-    }
-}
-
-/// Build a `kitty` command for opening a terminal at `path`, optionally running
-/// `run` first. For remote roots we wrap with the kitty ssh kitten, mirroring
-/// the user's shell helper `sshp` (kitten ssh -R 7897:127.0.0.1:7890).
-fn kitty_command(host: Option<&str>, path: &str, run: Option<&str>) -> Command {
-    let mut c = Command::new("kitty");
-    match host {
-        Some(h) => {
-            // sshp-equivalent: forward Clash proxy port to remote.
-            const SSHP_PORT_FORWARD: &str = "7897:127.0.0.1:7890";
-            let remote_cmd = match run {
-                Some(r) => format!("cd {}; {}; exec $SHELL", shell_quote(path), r),
-                None => format!("cd {}; exec $SHELL", shell_quote(path)),
             };
-            c.arg("+kitten")
-                .arg("ssh")
-                .arg("-R")
-                .arg(SSHP_PORT_FORWARD)
-                .arg(h)
-                .arg("-t")
-                .arg(remote_cmd);
+            expand_launcher_template(remote, &root.path, Some(host))
         }
         None => {
-            c.arg("--directory").arg(path);
-            if let Some(r) = run {
-                // Use the user's interactive zsh so .zshrc is sourced — the daemon
-                // runs as a systemd user service whose PATH lacks ~/.local/bin etc.
-                // After `r` exits, drop into a fresh interactive zsh.
-                c.arg("--")
-                    .arg("zsh")
-                    .arg("-ic")
-                    .arg(format!("{r}; exec zsh"));
-            }
+            let Some(local) = template.local.as_ref() else {
+                tracing::warn!(
+                    launcher,
+                    path = %root.path,
+                    "launcher has no local template; skipping"
+                );
+                return None;
+            };
+            expand_launcher_template(local, &root.path, None)
         }
-    }
-    c
+    };
+
+    let mut iter = argv.into_iter();
+    let Some(program) = iter.next() else {
+        tracing::warn!(launcher, "launcher template expanded to an empty command; skipping");
+        return None;
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(iter);
+    Some(cmd)
 }
 
-/// Single-quote a path for safe inclusion in a remote shell command.
-fn shell_quote(s: &str) -> String {
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{escaped}'")
+fn expand_launcher_template(argv: &[String], path: &str, host: Option<&str>) -> Vec<String> {
+    argv.iter()
+        .map(|arg| {
+            let arg = arg.replace("{path}", path);
+            match host {
+                Some(host) => arg.replace("{host}", host),
+                None => arg,
+            }
+        })
+        .collect()
 }
 
 fn status(state: &State) -> Payload {
@@ -1672,6 +2056,7 @@ fn apply_event(state: &State, event: Event) {
             }
         }
         Event::WindowClosed { id } => {
+            tracing::info!(window = %id, "window closed");
             let prev_workspace = state
                 .lock()
                 .unwrap()
@@ -1679,6 +2064,7 @@ fn apply_event(state: &State, event: Event) {
                 .remove(&id)
                 .and_then(|c| c.workspace_id);
             if let Some(ws_id) = prev_workspace {
+                tracing::info!(window = %id, workspace = %ws_id, "checking cleanup for workspace");
                 cleanup_workspace_if_empty(state, ws_id);
             }
         }
@@ -1696,9 +2082,11 @@ fn cleanup_workspace_if_empty(state: &State, ws_id: u64) {
         let Some(name) = inner.workspaces.get(&ws_id).and_then(|w| w.name.clone()) else {
             return;
         };
-        let is_project_ws = inner.projects.iter().any(|p| p.workspace_name == name);
-        if !is_project_ws {
-            return;
+        if !inner.config.cleanup_all_workspaces {
+            let is_project_ws = inner.projects.iter().any(|p| p.workspace_name == name);
+            if !is_project_ws {
+                return;
+            }
         }
         let still_has_claims = inner
             .claims

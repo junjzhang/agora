@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use agora::ipc::{self, Payload, Request, Response};
-use agora::model::{Launcher, ProjectSpec};
+use agora::model::ProjectSpec;
 
 #[derive(Parser)]
 #[command(
@@ -88,11 +88,9 @@ enum Cmd {
         /// Mark the root as remote (e.g. `gpu.coder`). PATH is not validated locally.
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
-        /// Add a launcher to spawn on `agora open`. May be repeated.
-        ///
-        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD` | `claude` | `codex`
-        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
-        launchers: Vec<Launcher>,
+        /// Add a launcher name to spawn on `agora open`. May be repeated.
+        #[arg(long = "launcher", value_name = "NAME")]
+        launchers: Vec<String>,
     },
     /// List all projects
     List {
@@ -161,11 +159,9 @@ enum Cmd {
         /// Mark the root as remote (e.g. `gpu.coder`).
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
-        /// Add a launcher. May be repeated.
-        ///
-        /// Format: `vscode` | `zed` | `kitty` | `kitty:CMD` | `claude` | `codex`
-        #[arg(long = "launcher", value_name = "KIND", value_parser = parse_launcher)]
-        launchers: Vec<Launcher>,
+        /// Add a launcher name. May be repeated.
+        #[arg(long = "launcher", value_name = "NAME")]
+        launchers: Vec<String>,
         /// If --name conflicts with the focused ws's existing name, rename the ws.
         #[arg(long)]
         rename_ws: bool,
@@ -204,7 +200,7 @@ fn main() -> Result<()> {
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            let kinds: Vec<&'static str> = p.roots[0].launchers.iter().map(|l| l.kind()).collect();
+            let kinds = &p.roots[0].launchers;
             let host_part = match p.roots[0].host.as_deref() {
                 Some(h) => format!(" @{h}"),
                 None => String::new(),
@@ -351,7 +347,9 @@ fn main() -> Result<()> {
             launchers,
             rename_ws,
         } => {
-            let root_path = if host.is_some() {
+            let root_path = if path.is_empty() {
+                String::new()
+            } else if host.is_some() {
                 path
             } else {
                 resolve_local_path(&path)?
@@ -366,7 +364,7 @@ fn main() -> Result<()> {
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            let kinds: Vec<&'static str> = p.roots[0].launchers.iter().map(|l| l.kind()).collect();
+            let kinds = &p.roots[0].launchers;
             let host_part = match p.roots[0].host.as_deref() {
                 Some(h) => format!(" @{h}"),
                 None => String::new(),
@@ -559,6 +557,14 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
                 obj.insert("agora_host".to_string(), serde_json::Value::String(name));
             }
         }
+        // Session slug from Claude Code's transcript files.
+        if !obj.contains_key("agora_slug") {
+            if let Some(sid) = obj.get("session_id").and_then(|v| v.as_str()) {
+                if let Some(slug) = find_session_slug(sid) {
+                    obj.insert("agora_slug".to_string(), serde_json::Value::String(slug));
+                }
+            }
+        }
         // PID of the process that invoked the hook (claude's fork). Daemon
         // walks up the process tree from here to find the terminal window.
         if !obj.contains_key("agora_pid") {
@@ -583,6 +589,45 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
     Ok(())
 }
 
+/// Find the session slug by scanning `~/.claude/projects/` for a JSONL file
+/// named `<session_id>.jsonl` and reading the `slug` from its last message.
+fn find_session_slug(session_id: &str) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let projects_dir = std::path::PathBuf::from(home).join(".claude").join("projects");
+    if !projects_dir.is_dir() {
+        return None;
+    }
+    for entry in std::fs::read_dir(&projects_dir).ok()? {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let jsonl = entry.path().join(format!("{session_id}.jsonl"));
+        if !jsonl.exists() {
+            continue;
+        }
+        // Read last few KB to find slug — don't parse the whole file.
+        let file = std::fs::File::open(&jsonl).ok()?;
+        let len = file.metadata().ok()?.len();
+        let read_from = if len > 4096 { len - 4096 } else { 0 };
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = file;
+        f.seek(SeekFrom::Start(read_from)).ok()?;
+        let mut tail = String::new();
+        f.read_to_string(&mut tail).ok()?;
+        // Find last complete line with a slug.
+        for line in tail.lines().rev() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(slug) = v.get("slug").and_then(|s| s.as_str()) {
+                    return Some(slug.to_string());
+                }
+            }
+        }
+        return None;
+    }
+    None
+}
+
 fn read_hostname() -> Option<String> {
     // Prefer AGORA_HOST env (set by hook commands installed via
     // `agora hook install --host-alias X`). Falls back to /etc/hostname.
@@ -602,12 +647,12 @@ fn read_hostname() -> Option<String> {
 /// surface is the same (settings.json + hooks).
 fn hook_settings_path(cli: &str) -> Result<std::path::PathBuf> {
     let home = std::env::var_os("HOME").context("HOME not set")?;
-    let dir = match cli {
-        "claude" => ".claude",
-        "codex" => ".codex",
+    let base = std::path::PathBuf::from(home);
+    match cli {
+        "claude" => Ok(base.join(".claude").join("settings.json")),
+        "codex" => Ok(base.join(".codex").join("settings.json")),
         other => anyhow::bail!("unknown cli '{other}' (expected claude|codex)"),
-    };
-    Ok(std::path::PathBuf::from(home).join(dir).join("settings.json"))
+    }
 }
 
 /// Marker substring: any hook command containing this is ours.
@@ -628,6 +673,14 @@ fn hook_events_for(cli: &str) -> &'static [(&'static str, bool)] {
             ("Notification", true),
             ("Stop", false),
             ("SubagentStop", false),
+        ],
+        "codex" => &[
+            ("SessionStart", false),
+            ("UserPromptSubmit", false),
+            ("PreToolUse", true),
+            ("PostToolUse", true),
+            ("PermissionRequest", true),
+            ("Stop", false),
         ],
         _ => &[],
     }
@@ -1007,28 +1060,6 @@ fn resolve_local_path(path: &str) -> Result<String> {
     }
     let cwd = std::env::current_dir().context("read cwd")?;
     Ok(cwd.join(p).to_string_lossy().into_owned())
-}
-
-fn parse_launcher(s: &str) -> Result<Launcher, String> {
-    match s {
-        "vscode" => Ok(Launcher::Vscode),
-        "zed" => Ok(Launcher::Zed),
-        "kitty" => Ok(Launcher::Kitty { run: None }),
-        "claude" => Ok(Launcher::Claude),
-        "codex" => Ok(Launcher::Codex),
-        other => {
-            if let Some(cmd) = other.strip_prefix("kitty:") {
-                Ok(Launcher::Kitty {
-                    run: Some(cmd.to_string()),
-                })
-            } else {
-                Err(format!(
-                    "unknown launcher '{other}' \
-                     (expected: vscode|zed|kitty|kitty:CMD|claude|codex)"
-                ))
-            }
-        }
-    }
 }
 
 fn call(req: Request) -> Result<Payload> {

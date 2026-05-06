@@ -11,10 +11,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::model::{Project, RemoteHost};
 
-pub const STORE_VERSION: u32 = 1;
+pub const STORE_VERSION: u32 = 2;
 pub const REMOTES_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +49,10 @@ pub fn remotes_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("remotes.json"))
 }
 
+pub fn launchers_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("launchers.json"))
+}
+
 pub fn load() -> Result<Vec<Project>> {
     let path = store_path()?;
     if !path.exists() {
@@ -58,23 +63,39 @@ pub fn load() -> Result<Vec<Project>> {
         return Ok(Vec::new());
     }
 
-    // Try the versioned envelope first.
-    if let Ok(env) = serde_json::from_str::<Envelope>(&buf) {
-        if env.version > STORE_VERSION {
-            bail!(
-                "{}: store version {} is newer than this binary supports (max {}); \
-                 upgrade agorad or restore an older backup",
-                path.display(),
-                env.version,
-                STORE_VERSION,
+    let value: Value = serde_json::from_str(&buf)
+        .with_context(|| format!("parse {}", path.display()))?;
+
+    if let Some(obj) = value.as_object() {
+        if let Some(version) = obj.get("version").and_then(Value::as_u64) {
+            if version > STORE_VERSION as u64 {
+                bail!(
+                    "{}: store version {} is newer than this binary supports (max {}); \
+                     upgrade agorad or restore an older backup",
+                    path.display(),
+                    version,
+                    STORE_VERSION,
+                );
+            }
+            if version == STORE_VERSION as u64 {
+                let env: Envelope = serde_json::from_value(Value::Object(obj.clone()))
+                    .with_context(|| format!("parse {}", path.display()))?;
+                return Ok(env.projects);
+            }
+            let projects_value = obj
+                .get("projects")
+                .cloned()
+                .context("store envelope missing projects")?;
+            let projects = migrate_projects(projects_value)?;
+            tracing::info!(
+                version,
+                "migrated store launcher format to v{STORE_VERSION} on next write"
             );
+            return Ok(projects);
         }
-        return Ok(env.projects);
     }
 
-    // Fall back to legacy v0: bare array of Project. Migrated on next save().
-    let projects: Vec<Project> = serde_json::from_str(&buf)
-        .with_context(|| format!("parse {} (tried envelope and legacy array)", path.display()))?;
+    let projects = migrate_projects(value)?;
     tracing::info!("migrated legacy v0 store to v{STORE_VERSION} on next write");
     Ok(projects)
 }
@@ -133,4 +154,79 @@ pub fn save_remotes(remotes: &[RemoteHost]) -> Result<()> {
     fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+fn migrate_projects(value: Value) -> Result<Vec<Project>> {
+    let mut projects = value;
+    let arr = projects
+        .as_array_mut()
+        .context("project store root must be an array")?;
+    for project in arr {
+        let project_id = project
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let Some(roots) = project.get_mut("roots").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for root in roots {
+            let root_path = root
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>")
+                .to_string();
+            let Some(launchers) = root.get_mut("launchers").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let legacy = std::mem::take(launchers);
+            for launcher in legacy {
+                match migrate_launcher(launcher, &project_id, &root_path) {
+                    Some(name) => launchers.push(Value::String(name)),
+                    None => continue,
+                }
+            }
+        }
+    }
+    serde_json::from_value(projects).context("deserialize migrated projects")
+}
+
+fn migrate_launcher(value: Value, project_id: &str, root_path: &str) -> Option<String> {
+    match value {
+        Value::String(name) => Some(name),
+        Value::Object(obj) => {
+            let kind = obj.get("kind").and_then(Value::as_str)?;
+            match kind {
+                "vscode" | "zed" | "claude" | "codex" => Some(kind.to_string()),
+                "kitty" => Some("terminal".to_string()),
+                "browser" | "custom" => {
+                    tracing::warn!(
+                        project = project_id,
+                        path = root_path,
+                        kind,
+                        "dropping unsupported legacy launcher during migration"
+                    );
+                    None
+                }
+                other => {
+                    tracing::warn!(
+                        project = project_id,
+                        path = root_path,
+                        kind = other,
+                        "dropping unknown legacy launcher during migration"
+                    );
+                    None
+                }
+            }
+        }
+        other => {
+            tracing::warn!(
+                project = project_id,
+                path = root_path,
+                launcher = %other,
+                "dropping malformed launcher during migration"
+            );
+            None
+        }
+    }
 }

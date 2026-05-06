@@ -62,40 +62,7 @@ pub struct Root {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default)]
-    pub launchers: Vec<Launcher>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Launcher {
-    Vscode,
-    Zed,
-    Kitty {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        run: Option<String>,
-    },
-    Claude,
-    Codex,
-    Browser {
-        url: String,
-    },
-    Custom {
-        argv: Vec<String>,
-    },
-}
-
-impl Launcher {
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Launcher::Vscode => "vscode",
-            Launcher::Zed => "zed",
-            Launcher::Kitty { .. } => "kitty",
-            Launcher::Claude => "claude",
-            Launcher::Codex => "codex",
-            Launcher::Browser { .. } => "browser",
-            Launcher::Custom { .. } => "custom",
-        }
-    }
+    pub launchers: Vec<String>,
 }
 
 /// A host the daemon keeps an SSH reverse-forward tunnel to.
@@ -155,6 +122,12 @@ pub struct AgentSession {
     /// Most recent Notification message (truncated upstream).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
+    /// Most recent user prompt (truncated). Shows what the agent is working on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    /// Session slug/tag from Claude Code (e.g. "sequential-hopping-creek").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     /// Unix timestamp of last state change.
     pub last_change: u64,
     /// Project id derived at IPC-response time from cwd vs project roots.
