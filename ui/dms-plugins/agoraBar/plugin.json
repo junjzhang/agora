@@ -1,0 +1,10 @@
+{
+    "id": "agoraBar",
+    "name": "Agora Status",
+    "description": "Bar pill showing live agent state from agora daemon",
+    "version": "1.0.0",
+    "author": "jay",
+    "firstParty": true,
+    "icon": "smart_toy",
+    "component": "./AgoraBarWidget.qml"
+}

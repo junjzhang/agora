@@ -1,0 +1,10 @@
+{
+    "id": "agoraWorkspaces",
+    "name": "Agora Workspace Switcher",
+    "description": "Workspace switcher with agent status indicators",
+    "version": "1.0.0",
+    "author": "jay",
+    "firstParty": true,
+    "icon": "workspaces",
+    "component": "./AgoraWorkspaces.qml"
+}
