@@ -6,11 +6,15 @@ ShellRoot {
     AgoraPicker {
         id: picker
         visible: false
-        Component.onCompleted: showTimer.start()
+        Component.onCompleted: {
+            var env = Quickshell.env("AGORA_PICKER_MODE")
+            if (env) picker.mode = env
+            showTimer.start()
+        }
         Timer {
             id: showTimer
             interval: 80
-            onTriggered: picker.visible = true
+            onTriggered: picker.toggleMode(picker.mode)
         }
     }
 

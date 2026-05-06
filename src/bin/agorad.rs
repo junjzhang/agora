@@ -1610,6 +1610,15 @@ fn apply_hook_inner(
         return;
     }
 
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tool_name = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let entry = inner.agents.entry(session_id.clone()).or_insert_with(|| {
         tracing::info!(session = %session_id, %cli_str, "agent session registered");
         AgentSession {
@@ -1626,6 +1635,10 @@ fn apply_hook_inner(
             project: None,
             host: host.clone(),
             pid,
+            model: None,
+            started_at: Some(now),
+            turn_count: 0,
+            current_tool: None,
         }
     });
 
@@ -1640,6 +1653,20 @@ fn apply_hook_inner(
     }
     if slug.is_some() {
         entry.slug = slug;
+    }
+    if model.is_some() {
+        entry.model = model;
+    }
+    if event == "SessionStart" && entry.started_at.is_none() {
+        entry.started_at = Some(now);
+    }
+    if event == "UserPromptSubmit" {
+        entry.turn_count += 1;
+    }
+    match event {
+        "PreToolUse" => entry.current_tool = tool_name,
+        "PostToolUse" | "Stop" | "SubagentStop" => entry.current_tool = None,
+        _ => {}
     }
     entry.last_event = Some(event.to_string());
 

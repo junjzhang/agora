@@ -177,7 +177,11 @@ WlrLayershell {
                     cwd: a.cwd || "",
                     lastPrompt: a.last_prompt || "",
                     lastMessage: a.last_message || "",
-                    slug: a.slug || ""
+                    slug: a.slug || "",
+                    model: a.model || "",
+                    startedAt: a.started_at || 0,
+                    turnCount: a.turn_count || 0,
+                    currentTool: a.current_tool || ""
                 })
             }
 
@@ -235,6 +239,21 @@ WlrLayershell {
             }
         }
         selectedIndex = found >= 0 ? found : firstSelectable()
+    }
+
+    function formatDuration(startedAt) {
+        if (!startedAt) return ""
+        const secs = Math.floor(Date.now() / 1000) - startedAt
+        if (secs < 60) return secs + "s"
+        if (secs < 3600) return Math.floor(secs / 60) + "m"
+        const h = Math.floor(secs / 3600)
+        const m = Math.floor((secs % 3600) / 60)
+        return h + "h" + (m > 0 ? m + "m" : "")
+    }
+
+    function shortModel(m) {
+        if (!m) return ""
+        return m.replace("claude-", "").replace(/-\d{8}$/, "")
     }
 
     function phasePrio(phase) {
@@ -432,8 +451,7 @@ WlrLayershell {
     // ── Main Panel ──
     Rectangle {
         id: panel
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: parent.height * 0.18
+        anchors.centerIn: parent
         width: Math.min(parent.width * 0.55, 780)
         height: Math.min(parent.height * 0.58, 540)
         radius: 16
@@ -505,7 +523,7 @@ WlrLayershell {
                         anchors.left: parent.left
                         anchors.leftMargin: 20
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "Search projects..."
+                        text: root.mode === "agents" ? "Search agents..." : "Search projects..."
                         color: "#555"
                         font.pixelSize: 16
                         visible: searchInput.text.length === 0 && !searchInput.preeditText
@@ -681,9 +699,11 @@ WlrLayershell {
                                         }
                                     }
                                     Text {
-                                        visible: !!(listItem.modelData.lastPrompt)
-                                        text: listItem.modelData.lastPrompt || ""
-                                        color: "#888"
+                                        visible: !!(listItem.modelData.currentTool) || !!(listItem.modelData.lastPrompt)
+                                        text: listItem.modelData.currentTool
+                                            ? "▸ " + listItem.modelData.currentTool
+                                            : (listItem.modelData.lastPrompt || "")
+                                        color: listItem.modelData.currentTool ? root.phaseColor("running") : "#888"
                                         font.pixelSize: 13
                                         elide: Text.ElideRight
                                         maximumLineCount: 1
@@ -905,6 +925,40 @@ WlrLayershell {
                                             color: root.phaseColor(root.selectedItem?.phase || "idle")
                                             font.pixelSize: 14
                                         }
+                                    }
+                                }
+                                Row {
+                                    width: parent.width
+                                    spacing: 12
+                                    Column {
+                                        spacing: 3
+                                        visible: !!(root.selectedItem?.model)
+                                        Text { text: "MODEL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                                        Text { text: root.shortModel(root.selectedItem?.model || ""); color: "#ccc"; font.pixelSize: 13; font.family: "monospace" }
+                                    }
+                                    Column {
+                                        spacing: 3
+                                        visible: !!(root.selectedItem?.startedAt)
+                                        Text { text: "DURATION"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                                        Text { text: root.formatDuration(root.selectedItem?.startedAt || 0); color: "#ccc"; font.pixelSize: 13 }
+                                    }
+                                    Column {
+                                        spacing: 3
+                                        visible: (root.selectedItem?.turnCount || 0) > 0
+                                        Text { text: "TURNS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                                        Text { text: String(root.selectedItem?.turnCount || 0); color: "#ccc"; font.pixelSize: 13 }
+                                    }
+                                }
+                                Column {
+                                    width: parent.width
+                                    spacing: 3
+                                    visible: !!(root.selectedItem?.currentTool)
+                                    Text { text: "CURRENT TOOL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                                    Text {
+                                        text: root.selectedItem?.currentTool || ""
+                                        color: root.phaseColor("running")
+                                        font.pixelSize: 13
+                                        font.family: "monospace"
                                     }
                                 }
                                 Column {

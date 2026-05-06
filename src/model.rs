@@ -145,4 +145,16 @@ pub struct AgentSession {
     /// Daemon walks up the process tree to find the enclosing terminal window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i32>,
+    /// Model name reported by hook payload (e.g. "claude-opus-4-6").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Unix timestamp (secs) when the session was first seen (SessionStart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    /// Number of user prompts submitted this session.
+    #[serde(default)]
+    pub turn_count: u32,
+    /// Tool currently being executed (set on PreToolUse, cleared on PostToolUse/Stop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
 }
