@@ -138,6 +138,9 @@ pub struct AgentSession {
     /// hostname; remote sessions (via SSH reverse forward) report their own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// Workspace name the agent's terminal is on (derived at response time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     /// PID of the process that invoked the hook (typically claude's fork).
     /// Daemon walks up the process tree to find the enclosing terminal window.
     #[serde(default, skip_serializing_if = "Option::is_none")]

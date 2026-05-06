@@ -441,6 +441,24 @@ fn agents(state: &State) -> Vec<AgentSession> {
                 .cwd
                 .as_deref()
                 .and_then(|c| match_cwd_to_project(c, agent_host.as_deref(), &inner.projects));
+            // Derive workspace name from pid → window → workspace_id → name.
+            if agent_host.is_none() {
+                if let Some(pid) = a.pid {
+                    if let Some(wid) = find_window_for_pid(&inner.claims, pid) {
+                        let ws_id = inner.claims.get(&wid).and_then(|c| c.workspace_id);
+                        if let Some(ws_id) = ws_id {
+                            a.workspace = inner.workspaces.get(&ws_id).and_then(|w| w.name.clone());
+                        }
+                    }
+                }
+            } else {
+                // Remote agent: workspace = project workspace_name (best guess)
+                if let Some(ref proj_id) = a.project {
+                    a.workspace = inner.projects.iter()
+                        .find(|p| p.id == *proj_id)
+                        .map(|p| p.workspace_name.clone());
+                }
+            }
             a
         })
         .collect();
@@ -1603,6 +1621,7 @@ fn apply_hook_inner(
             last_message: None,
             last_prompt: None,
             slug: slug.clone(),
+            workspace: None,
             last_change: now,
             project: None,
             host: host.clone(),
