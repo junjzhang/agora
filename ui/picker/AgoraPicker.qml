@@ -52,6 +52,7 @@ WlrLayershell {
     property bool actionMode: false
     property int actionIndex: 0
     property var actionList: []
+    property string actionRequestKey: ""
 
     property var selectedItem: filteredItems.length > 0 && selectedIndex < filteredItems.length
         ? filteredItems[selectedIndex] : null
@@ -99,6 +100,23 @@ WlrLayershell {
             onStreamFinished: {
                 try { root.workspaces = JSON.parse(text.trim() || "[]") } catch(e) { root.workspaces = [] }
                 root.rebuildItems()
+            }
+        }
+    }
+    Process {
+        id: actionsProc
+        command: []
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (root.actionRequestKey !== root.currentActionTargetKey()) return
+                try {
+                    const actions = JSON.parse(text.trim() || "[]")
+                    root.actionList = root.daemonActionsToRows(actions, root.selectedItem)
+                } catch(e) {
+                    root.actionList = []
+                }
+                root.actionIndex = root.firstActionIndex()
             }
         }
     }
@@ -277,52 +295,61 @@ WlrLayershell {
         return "idle"
     }
 
+    function currentActionTargetKey() {
+        const item = root.selectedItem
+        if (!item || item.type !== "project") return ""
+        return "project:" + item.id
+    }
+
+    function loadActions(item) {
+        if (!item) {
+            root.actionList = []
+            root.actionIndex = 0
+            return
+        }
+        if (item.type === "project") {
+            root.actionRequestKey = "project:" + item.id
+            root.actionList = [{ section: "LOADING" }]
+            root.actionIndex = 0
+            actionsProc.running = false
+            actionsProc.command = ["/home/jay/.local/bin/agora", "actions", "project", item.id]
+            actionsProc.running = true
+            return
+        }
+        root.actionRequestKey = ""
+        root.actionList = root.getActions(item)
+        root.actionIndex = root.firstActionIndex()
+    }
+
+    function daemonActionsToRows(actions, item) {
+        if (!item || item.type !== "project") return []
+        const rows = []
+        let group = ""
+        for (const action of actions) {
+            const nextGroup = action.group || "ACTIONS"
+            if (nextGroup !== group) {
+                rows.push({ section: nextGroup })
+                group = nextGroup
+            }
+            const actionId = action.id || ""
+            const targetId = item.id
+            rows.push({
+                label: action.label || actionId,
+                key: action.key || "",
+                run: () => root.runDaemonAction("project", targetId, actionId)
+            })
+        }
+        return rows
+    }
+
+    function runDaemonAction(target, id, actionId) {
+        Quickshell.execDetached(["/home/jay/.local/bin/agora", "run-action", target, id, actionId])
+    }
+
     function getActions(item) {
         if (!item) return []
         if (item.type === "project") {
-            const actions = []
-
-            // OPEN
-            actions.push({ section: "OPEN" })
-            actions.push({ label: "Open workspace", key: "↵", run: () => Quickshell.execDetached(["/home/jay/.local/bin/agora", "open", item.id]) })
-            actions.push({ label: "Open terminal", key: "⌥T", run: () => {
-                if (item.host) Quickshell.execDetached(["kitty", "ssh", item.host, "-t", "cd '" + item.path + "' 2>/dev/null; exec $SHELL"])
-                else Quickshell.execDetached(["kitty", "--directory", item.path])
-            }})
-            actions.push({ label: "Open VS Code", key: "⌥V", run: () => {
-                const uri = item.host ? "vscode-remote://ssh-remote+" + item.host + item.path : "file://" + item.path
-                Quickshell.execDetached(["code", "--folder-uri", uri])
-            }})
-            if (!item.host) {
-                actions.push({ label: "Open file manager", key: "⌥F", run: () => Quickshell.execDetached(["xdg-open", item.path]) })
-            }
-
-            // AGENT
-            actions.push({ section: "AGENT" })
-            actions.push({ label: "Start Claude session", key: "", run: () => {
-                if (item.host) Quickshell.execDetached(["kitty", "ssh", item.host, "-t", "cd '" + item.path + "' && claude; exec $SHELL"])
-                else Quickshell.execDetached(["kitty", "--directory", item.path, "zsh", "-ic", "claude; exec zsh"])
-            }})
-
-            // EDIT
-            actions.push({ section: "EDIT" })
-            actions.push({ label: "Edit project spec", key: "⌥E", run: () => {
-                Quickshell.execDetached(["kitty", "zsh", "-ic", "/home/jay/.local/bin/agora edit " + item.id + "; exec zsh"])
-            }})
-            actions.push({ label: "Rename project", key: "", run: () => {
-                // TODO: needs input UI, for now open terminal
-                Quickshell.execDetached(["kitty", "zsh", "-ic", "echo 'agora rename " + item.id + " <new-name>' && exec zsh"])
-            }})
-
-            // MANAGE
-            actions.push({ section: "MANAGE" })
-            actions.push({ label: "Attach to current workspace", key: "", run: () => {
-                Quickshell.execDetached(["/home/jay/.local/bin/agora", "attach", item.id])
-            }})
-            actions.push({ label: "Copy path", key: "⌥C", run: () => Quickshell.execDetached(["dms", "cl", "copy", item.path]) })
-            actions.push({ label: "Forget project", key: "⌥⌫", run: () => Quickshell.execDetached(["/home/jay/.local/bin/agora", "forget", item.id]) })
-
-            return actions
+            return []
         }
         if (item.type === "workspace") {
             const name = item.name
@@ -338,10 +365,11 @@ WlrLayershell {
                 { label: "Focus workspace", key: "↵", run: () => Quickshell.execDetached(["niri", "msg", "action", "focus-workspace", name]) },
                 { section: "PROMOTE" },
                 { label: "Promote (bare)", key: "", run: promote([]) },
-                { label: "Promote + terminal", key: "", run: promote(["kitty"]) },
-                { label: "Promote + VS Code", key: "", run: promote(["vscode", "kitty"]) },
-                { label: "Promote + Claude", key: "", run: promote(["claude", "kitty"]) },
-                { label: "Promote (full stack)", key: "", run: promote(["vscode", "kitty", "claude"]) },
+                { label: "Promote + terminal", key: "", run: promote(["terminal"]) },
+                { label: "Promote + VS Code", key: "", run: promote(["vscode", "terminal"]) },
+                { label: "Promote + Claude", key: "", run: promote(["claude", "terminal"]) },
+                { label: "Promote + Codex", key: "", run: promote(["codex", "terminal"]) },
+                { label: "Promote (full stack)", key: "", run: promote(["vscode", "terminal", "claude", "codex"]) },
             ]
         }
         if (item.type === "agent") {
@@ -383,6 +411,11 @@ WlrLayershell {
 
     function executeItem(item) {
         if (!item || !isSelectable(item)) return
+        if (item.type === "project") {
+            root.runDaemonAction("project", item.id, "builtin:open")
+            root.visible = false
+            return
+        }
         if (item.type === "agent") {
             Quickshell.execDetached(["/home/jay/.local/bin/agora", "focus-agent", item.sessionId])
             root.visible = false
@@ -493,8 +526,7 @@ WlrLayershell {
                             } else if (event.key === Qt.Key_Tab) {
                                 root.actionMode = !root.actionMode
                                 if (root.actionMode) {
-                                    root.actionList = root.getActions(root.selectedItem)
-                                    root.actionIndex = root.firstActionIndex()
+                                    root.loadActions(root.selectedItem)
                                 }
                                 event.accepted = true
                             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {

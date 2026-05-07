@@ -7,9 +7,10 @@ use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
+use agora::ipc::ActionTarget;
 use agora::ipc::{self, Payload, Request, Response};
 use agora::model::ProjectSpec;
 
@@ -33,18 +34,14 @@ enum RemoteCmd {
         host: String,
     },
     /// Remove a remote host (also tears down its tunnel).
-    Remove {
-        host: String,
-    },
+    Remove { host: String },
     /// List configured remotes with tunnel status.
     List {
         #[arg(long)]
         json: bool,
     },
     /// Push the agora binary to the remote and install hooks there.
-    Install {
-        host: String,
-    },
+    Install { host: String },
 }
 
 #[derive(Subcommand)]
@@ -135,6 +132,22 @@ enum Cmd {
     FocusAgent {
         /// Agent session id (from `agora agents`)
         session_id: String,
+    },
+    /// List picker actions for a target as JSON
+    Actions {
+        /// Target kind (currently: project)
+        target: String,
+        /// Target id
+        id: String,
+    },
+    /// Execute a picker action returned by `agora actions`
+    RunAction {
+        /// Target kind (currently: project)
+        target: String,
+        /// Target id
+        id: String,
+        /// Action id
+        action_id: String,
     },
     /// Manage remote hosts (SSH reverse-forward tunnels)
     #[command(subcommand)]
@@ -291,6 +304,29 @@ fn main() -> Result<()> {
         Cmd::Hook(HookCmd::Event { event, cli }) => hook_event(&event, &cli)?,
         Cmd::FocusAgent { session_id } => {
             let payload = call(Request::FocusAgent { session_id })?;
+            if !matches!(payload, Payload::Ack) {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            }
+        }
+        Cmd::Actions { target, id } => {
+            let payload = call(Request::Actions {
+                target: parse_action_target(&target, id)?,
+            })?;
+            let Payload::Actions(actions) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            serde_json::to_writer(std::io::stdout(), &actions).context("serialize actions")?;
+            println!();
+        }
+        Cmd::RunAction {
+            target,
+            id,
+            action_id,
+        } => {
+            let payload = call(Request::RunAction {
+                target: parse_action_target(&target, id)?,
+                action_id,
+            })?;
             if !matches!(payload, Payload::Ack) {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             }
@@ -593,7 +629,9 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
 /// named `<session_id>.jsonl` and reading the `slug` from its last message.
 fn find_session_slug(session_id: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
-    let projects_dir = std::path::PathBuf::from(home).join(".claude").join("projects");
+    let projects_dir = std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("projects");
     if !projects_dir.is_dir() {
         return None;
     }
@@ -693,8 +731,8 @@ fn hook_install(cli: &str, host_alias: Option<&str>) -> Result<()> {
             .with_context(|| format!("mkdir -p {}", parent.display()))?;
     }
     let mut data: serde_json::Value = if path.exists() {
-        let buf = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let buf =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if buf.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -744,10 +782,7 @@ fn hook_install(cli: &str, host_alias: Option<&str>) -> Result<()> {
             .entry(event_name.to_string())
             .or_insert_with(|| serde_json::json!([]));
         if !arr.is_array() {
-            anyhow::bail!(
-                "hooks.{event_name} in {} is not an array",
-                path.display()
-            );
+            anyhow::bail!("hooks.{event_name} in {} is not an array", path.display());
         }
         let arr = arr.as_array_mut().unwrap();
         let already_present = arr.iter().any(|item| {
@@ -792,8 +827,8 @@ fn hook_uninstall(cli: &str) -> Result<()> {
     if buf.trim().is_empty() {
         return Ok(());
     }
-    let mut data: serde_json::Value = serde_json::from_str(&buf)
-        .with_context(|| format!("parse {} as JSON", path.display()))?;
+    let mut data: serde_json::Value =
+        serde_json::from_str(&buf).with_context(|| format!("parse {} as JSON", path.display()))?;
     let Some(hooks) = data
         .as_object_mut()
         .and_then(|o| o.get_mut("hooks"))
@@ -950,9 +985,7 @@ fn remote_install(host: &str) -> Result<()> {
         .with_context(|| format!("remote returned non-numeric uid: {probe_out:?}"))?;
     println!("remote: arch={arch} uid={uid}");
     if arch != "x86_64" {
-        bail!(
-            "remote arch '{arch}' is not x86_64; cross-arch install not yet supported"
-        );
+        bail!("remote arch '{arch}' is not x86_64; cross-arch install not yet supported");
     }
 
     // 2. ensure remote ~/.local/bin exists
@@ -1008,7 +1041,10 @@ fn remote_install(host: &str) -> Result<()> {
             String::from_utf8_lossy(&hooks.stderr).trim()
         );
     }
-    println!("hook install: {}", String::from_utf8_lossy(&hooks.stdout).trim());
+    println!(
+        "hook install: {}",
+        String::from_utf8_lossy(&hooks.stdout).trim()
+    );
 
     // 6. register the host with the local daemon (idempotent: re-add updates)
     let payload = call(Request::RemoteAdd {
@@ -1030,7 +1066,9 @@ fn local_release_binary() -> Result<std::path::PathBuf> {
     // Defaults to whichever cwd we're invoked from (likely the user's project).
     let exe = std::env::current_exe().context("read current_exe")?;
     // exe is at .../target/release/agora — we're already that.
-    if exe.ends_with("target/release/agora") || exe.ends_with("target/x86_64-unknown-linux-gnu/release/agora") {
+    if exe.ends_with("target/release/agora")
+        || exe.ends_with("target/x86_64-unknown-linux-gnu/release/agora")
+    {
         return Ok(exe);
     }
     // Try ~/.cargo or PATH-resolved binary's path. As fallback look at $AGORA_BIN.
@@ -1060,6 +1098,13 @@ fn resolve_local_path(path: &str) -> Result<String> {
     }
     let cwd = std::env::current_dir().context("read cwd")?;
     Ok(cwd.join(p).to_string_lossy().into_owned())
+}
+
+fn parse_action_target(kind: &str, id: String) -> Result<ActionTarget> {
+    match kind {
+        "project" => Ok(ActionTarget::Project { id }),
+        other => bail!("unknown action target '{other}' (expected project)"),
+    }
 }
 
 fn call(req: Request) -> Result<Payload> {

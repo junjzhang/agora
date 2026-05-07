@@ -1064,6 +1064,17 @@ Item {
                     }
                 }
 
+                property string _prevAgentPhase: ""
+                property string _currentAgentPhase: root.agentPhaseForWs(modelData?.name)
+                on_CurrentAgentPhaseChanged: {
+                    if (_prevAgentPhase !== "" && _currentAgentPhase !== _prevAgentPhase && _currentAgentPhase !== "") {
+                        phaseFlash.color = root.agentDotColor(_currentAgentPhase)
+                        phaseFlash.opacity = 0.35
+                        phaseFlashAnim.restart()
+                    }
+                    _prevAgentPhase = _currentAgentPhase
+                }
+
                 property bool isActive: {
                     if (root.useExtWorkspace)
                         return (modelData?.id || modelData?.name) === root.currentWorkspace;
@@ -1595,6 +1606,20 @@ Item {
                         ColorAnimation {
                             duration: Theme.mediumDuration
                             easing.type: Theme.emphasizedEasing
+                        }
+                    }
+
+                    Rectangle {
+                        id: phaseFlash
+                        anchors.fill: parent
+                        radius: parent.radius
+                        opacity: 0
+                        NumberAnimation on opacity {
+                            id: phaseFlashAnim
+                            running: false
+                            from: 0.35; to: 0
+                            duration: 800
+                            easing.type: Easing.OutCubic
                         }
                     }
 

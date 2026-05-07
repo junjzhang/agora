@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{AgentSession, Project, ProjectSpec, RemoteHost};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ActionTarget {
+    Project { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionSummary {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
 pub fn socket_path() -> Result<PathBuf> {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !d.is_empty() {
@@ -118,6 +133,15 @@ pub enum Request {
     FocusAgent {
         session_id: String,
     },
+    /// List UI actions available for a target. Picker renders this directly.
+    Actions {
+        target: ActionTarget,
+    },
+    /// Execute an action previously returned by `Actions`.
+    RunAction {
+        target: ActionTarget,
+        action_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +173,7 @@ pub enum Payload {
         niri_ws_renamed: bool,
     },
     Agents(Vec<AgentSession>),
+    Actions(Vec<ActionSummary>),
     Remotes(Vec<RemoteSummary>),
     Remote(RemoteSummary),
 }
