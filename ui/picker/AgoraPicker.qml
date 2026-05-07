@@ -208,7 +208,8 @@ WlrLayershell {
                     model: a.model || "",
                     startedAt: a.started_at || 0,
                     turnCount: a.turn_count || 0,
-                    currentTool: a.current_tool || ""
+                    currentTool: a.current_tool || "",
+                    lastChange: a.last_change || 0
                 })
             }
 
@@ -269,6 +270,7 @@ WlrLayershell {
     }
 
     function formatDuration(startedAt) {
+        root._tick;
         if (!startedAt) return ""
         const secs = Math.floor(Date.now() / 1000) - startedAt
         if (secs < 60) return secs + "s"
@@ -281,6 +283,33 @@ WlrLayershell {
     function shortModel(m) {
         if (!m) return ""
         return m.replace("claude-", "").replace(/-\d{8}$/, "")
+    }
+
+    function modelColor(m) {
+        if (!m) return "#888"
+        if (m.includes("opus")) return "#E0A0FF"
+        if (m.includes("sonnet")) return "#7EC8E3"
+        if (m.includes("haiku")) return "#A8D5A2"
+        if (m.includes("gpt")) return "#74AA9C"
+        return "#ccc"
+    }
+
+    property int _tick: 0
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.visible && root.selectedItem?.type === "agent"
+        onTriggered: root._tick++
+    }
+
+    function timeAgo(ts) {
+        root._tick;
+        if (!ts) return ""
+        const secs = Math.floor(Date.now() / 1000) - ts
+        if (secs < 10) return "just now"
+        if (secs < 60) return secs + "s ago"
+        if (secs < 3600) return Math.floor(secs / 60) + "m ago"
+        return Math.floor(secs / 3600) + "h ago"
     }
 
     function phasePrio(phase) {
@@ -967,13 +996,28 @@ WlrLayershell {
                                 }
                                 Row {
                                     width: parent.width
-                                    spacing: 12
-                                    Column {
-                                        spacing: 3
-                                        visible: !!(root.selectedItem?.model)
-                                        Text { text: "MODEL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                        Text { text: root.shortModel(root.selectedItem?.model || ""); color: "#ccc"; font.pixelSize: 13; font.family: "monospace" }
+                                    spacing: 8
+                                    visible: !!(root.selectedItem?.model)
+                                    Rectangle {
+                                        width: modelLabel.implicitWidth + 12; height: 22; radius: 4
+                                        color: Qt.rgba(root.modelColor(root.selectedItem?.model || "").r || 0.5,
+                                                       root.modelColor(root.selectedItem?.model || "").g || 0.5,
+                                                       root.modelColor(root.selectedItem?.model || "").b || 0.5, 0.15)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        Text {
+                                            id: modelLabel
+                                            anchors.centerIn: parent
+                                            text: root.shortModel(root.selectedItem?.model || "")
+                                            color: root.modelColor(root.selectedItem?.model || "")
+                                            font.pixelSize: 12
+                                            font.weight: Font.Medium
+                                            font.family: "monospace"
+                                        }
                                     }
+                                }
+                                Row {
+                                    width: parent.width
+                                    spacing: 16
                                     Column {
                                         spacing: 3
                                         visible: !!(root.selectedItem?.startedAt)
@@ -985,6 +1029,12 @@ WlrLayershell {
                                         visible: (root.selectedItem?.turnCount || 0) > 0
                                         Text { text: "TURNS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
                                         Text { text: String(root.selectedItem?.turnCount || 0); color: "#ccc"; font.pixelSize: 13 }
+                                    }
+                                    Column {
+                                        spacing: 3
+                                        visible: !!(root.selectedItem?.lastChange)
+                                        Text { text: "LAST ACTIVE"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                                        Text { text: root.timeAgo(root.selectedItem?.lastChange || 0); color: "#888"; font.pixelSize: 13 }
                                     }
                                 }
                                 Column {
