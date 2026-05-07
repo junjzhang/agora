@@ -58,9 +58,7 @@ WlrLayershell {
         ? filteredItems[selectedIndex] : null
 
     function refreshData() {
-        projectsProc.running = true
-        agentsProc.running = true
-        wsProc.running = true
+        stateProc.running = true
     }
 
     Timer {
@@ -71,34 +69,22 @@ WlrLayershell {
     }
 
     Process {
-        id: projectsProc
-        command: ["/home/jay/.local/bin/agora", "list", "--json"]
+        id: stateProc
+        command: ["/home/jay/.local/bin/agora", "picker-state"]
         running: false
         stdout: StdioCollector {
             onStreamFinished: {
-                try { root.projects = JSON.parse(text.trim() || "[]") } catch(e) { root.projects = [] }
-                root.rebuildItems()
-            }
-        }
-    }
-    Process {
-        id: agentsProc
-        command: ["/home/jay/.local/bin/agora", "agents", "--json"]
-        running: false
-        stdout: StdioCollector {
-            onStreamFinished: {
-                try { root.agents = JSON.parse(text.trim() || "[]") } catch(e) { root.agents = [] }
-                root.rebuildItems()
-            }
-        }
-    }
-    Process {
-        id: wsProc
-        command: ["niri", "msg", "--json", "workspaces"]
-        running: false
-        stdout: StdioCollector {
-            onStreamFinished: {
-                try { root.workspaces = JSON.parse(text.trim() || "[]") } catch(e) { root.workspaces = [] }
+                try {
+                    const d = JSON.parse(text.trim() || "{}")
+                    const ps = d.PickerState || d
+                    root.projects = ps.projects || []
+                    root.agents = ps.agents || []
+                    root.workspaces = ps.workspaces || []
+                } catch(e) {
+                    root.projects = []
+                    root.agents = []
+                    root.workspaces = []
+                }
                 root.rebuildItems()
             }
         }

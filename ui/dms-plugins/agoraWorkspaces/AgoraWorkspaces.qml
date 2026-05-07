@@ -19,46 +19,33 @@ Item {
     property real barThickness: 48
     property var barConfig: null
 
-    // Agora agent status polling
+    // Agora state polling (single IPC call)
     property var agentsByWorkspace: ({})
     property var projectWsNames: new Set()
 
     Process {
-        id: agentProc
-        command: ["/home/jay/.local/bin/agora", "agents", "--json"]
+        id: stateProc
+        command: ["/home/jay/.local/bin/agora", "picker-state"]
         stdout: SplitParser {
             splitMarker: ""
             onRead: data => {
                 try {
-                    const agents = JSON.parse(data);
+                    const d = JSON.parse(data);
+                    const ps = d.PickerState || d;
                     const prio = {"waiting_permission": 4, "waiting_input": 3, "running": 2, "idle": 1};
                     const result = {};
-                    for (const a of agents) {
+                    for (const a of (ps.agents || [])) {
                         const ws = a.workspace || a.project || "";
                         const phase = a.phase || "idle";
                         if (ws && (!result[ws] || (prio[phase] || 0) > (prio[result[ws]] || 0)))
                             result[ws] = phase;
                     }
                     root.agentsByWorkspace = result;
-                } catch (e) {
-                    root.agentsByWorkspace = {};
-                }
-            }
-        }
-    }
-
-    Process {
-        id: projectProc
-        command: ["/home/jay/.local/bin/agora", "list", "--json"]
-        stdout: SplitParser {
-            splitMarker: ""
-            onRead: data => {
-                try {
-                    const projects = JSON.parse(data);
                     const names = new Set();
-                    for (const p of projects) names.add(p.workspace_name);
+                    for (const p of (ps.projects || [])) names.add(p.workspace_name);
                     root.projectWsNames = names;
                 } catch (e) {
+                    root.agentsByWorkspace = {};
                     root.projectWsNames = new Set();
                 }
             }
@@ -71,8 +58,7 @@ Item {
         repeat: true
         triggeredOnStart: true
         onTriggered: {
-            if (!agentProc.running) agentProc.running = true;
-            if (!projectProc.running) projectProc.running = true;
+            if (!stateProc.running) stateProc.running = true;
         }
     }
 

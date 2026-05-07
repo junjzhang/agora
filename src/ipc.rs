@@ -142,6 +142,8 @@ pub enum Request {
         target: ActionTarget,
         action_id: String,
     },
+    /// Combined state for picker: projects + agents + workspaces in one call.
+    PickerState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,8 +176,21 @@ pub enum Payload {
     },
     Agents(Vec<AgentSession>),
     Actions(Vec<ActionSummary>),
+    PickerState {
+        projects: Vec<Project>,
+        agents: Vec<AgentSession>,
+        workspaces: Vec<WorkspaceSummary>,
+    },
     Remotes(Vec<RemoteSummary>),
     Remote(RemoteSummary),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSummary {
+    pub id: u64,
+    pub name: Option<String>,
+    pub is_active: bool,
+    pub is_focused: bool,
 }
 
 /// One remote, with both stored config and live tunnel status.

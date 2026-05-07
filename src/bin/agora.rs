@@ -133,6 +133,8 @@ enum Cmd {
         /// Agent session id (from `agora agents`)
         session_id: String,
     },
+    /// Combined picker state: projects + agents + workspaces (JSON)
+    PickerState,
     /// List picker actions for a target as JSON
     Actions {
         /// Target kind (currently: project)
@@ -305,6 +307,11 @@ fn main() -> Result<()> {
             if !matches!(payload, Payload::Ack) {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             }
+        }
+        Cmd::PickerState => {
+            let payload = call(Request::PickerState)?;
+            serde_json::to_writer(std::io::stdout(), &payload).context("serialize picker state")?;
+            println!();
         }
         Cmd::Actions { target, id } => {
             let payload = call(Request::Actions {

@@ -43,6 +43,9 @@ pub(crate) struct Inner {
 pub(crate) struct WorkspaceInfo {
     pub idx: u8,
     pub name: Option<String>,
+    pub is_active: bool,
+    pub is_focused: bool,
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,5 +230,28 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             actions::run_action(state, target, &action_id)?;
             Ok(Payload::Ack)
         }
+        Request::PickerState => Ok(picker_state(state)),
+    }
+}
+
+fn picker_state(state: &State) -> Payload {
+    let projects = state.lock().unwrap().projects.clone();
+    let agents = hooks::agents(state);
+    let workspaces: Vec<agora::ipc::WorkspaceSummary> = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .iter()
+        .map(|(&id, w)| agora::ipc::WorkspaceSummary {
+            id,
+            name: w.name.clone(),
+            is_active: w.is_active,
+            is_focused: w.is_focused,
+        })
+        .collect();
+    Payload::PickerState {
+        projects,
+        agents,
+        workspaces,
     }
 }
