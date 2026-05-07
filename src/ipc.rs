@@ -215,7 +215,6 @@ pub struct WindowSummary {
     pub workspace_name: Option<String>,
     pub column: Option<usize>,
     pub pid: Option<i32>,
-    pub cwd: Option<String>,
 }
 
 impl Response {

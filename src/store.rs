@@ -49,10 +49,6 @@ pub fn remotes_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("remotes.json"))
 }
 
-pub fn launchers_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("launchers.json"))
-}
-
 pub fn load() -> Result<Vec<Project>> {
     let path = store_path()?;
     if !path.exists() {

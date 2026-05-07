@@ -1240,10 +1240,15 @@ fn match_cwd_to_project(
 }
 
 fn read_local_hostname() -> Option<String> {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .clone()
 }
 
 fn remote_add(state: &State, host_name: String, remote_uid: u32) -> Result<RemoteSummary> {
@@ -1446,29 +1451,6 @@ fn find_window_for_pid(claims: &HashMap<u64, Claim>, start_pid: i32) -> Option<u
 
 /// Query kitty remote control for a window's cwd. Finds the kitty socket
 /// for the given PID and asks for the foreground process's cwd.
-fn get_kitty_window_cwd(kitty_pid: i32) -> Option<String> {
-    let sock = format!("unix:/tmp/kitty-{kitty_pid}");
-    let output = std::process::Command::new("kitty")
-        .args(["@", "--to", &sock, "ls"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let data: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    // kitty @ ls returns [{tabs: [{windows: [{pid, cwd, is_focused, ...}]}]}]
-    for os_win in data.as_array()? {
-        for tab in os_win.get("tabs")?.as_array()? {
-            for win in tab.get("windows")?.as_array()? {
-                if win.get("is_focused")?.as_bool() == Some(true) {
-                    return win.get("cwd")?.as_str().map(String::from);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Walk down the process tree to the deepest single child. Terminals (kitty)
 /// spawn a shell whose cwd is the user's working directory; the terminal
 /// process itself sits at `/`.
@@ -2284,27 +2266,19 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
 
     // Notification message: a short reason the agent wants attention.
     let message = if event == "Notification" {
-        payload.get("message").and_then(|v| v.as_str()).map(|s| {
-            let trimmed = s.trim();
-            if trimmed.len() > 200 {
-                format!("{}…", &trimmed[..200])
-            } else {
-                trimmed.to_string()
-            }
-        })
+        payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s.trim(), 200))
     } else {
         None
     };
 
     let prompt = if event == "UserPromptSubmit" {
-        payload.get("prompt").and_then(|v| v.as_str()).map(|s| {
-            let trimmed = s.trim();
-            if trimmed.len() > 120 {
-                format!("{}…", &trimmed[..120])
-            } else {
-                trimmed.to_string()
-            }
-        })
+        payload
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s.trim(), 120))
     } else {
         None
     };
@@ -2774,7 +2748,6 @@ fn status(state: &State) -> Payload {
                 workspace_name: ws_info.and_then(|w| w.name.clone()),
                 column: c.column,
                 pid: c.pid,
-                cwd: None,
             }
         })
         .collect();
@@ -2792,6 +2765,13 @@ fn niri_call(req: NiriRequest) -> Result<NiriResponse> {
     let mut socket = Socket::connect().context("connect to niri socket")?;
     let reply: Reply = socket.send(req).context("send request to niri")?;
     reply.map_err(|msg| anyhow::anyhow!("niri error: {msg}"))
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}…", &s[..byte_idx]),
+        None => s.to_string(),
+    }
 }
 
 fn unix_now() -> u64 {

@@ -348,9 +348,6 @@ WlrLayershell {
 
     function getActions(item) {
         if (!item) return []
-        if (item.type === "project") {
-            return []
-        }
         if (item.type === "workspace") {
             const name = item.name
             function promote(launchers) {
@@ -896,7 +893,7 @@ WlrLayershell {
                                                 Text {
                                                     id: lText
                                                     anchors.centerIn: parent
-                                                    text: modelData.kind
+                                                    text: modelData
                                                     color: "#aaa"
                                                     font.pixelSize: 12
                                                 }

@@ -213,21 +213,18 @@ fn main() -> Result<()> {
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            let kinds = &p.roots[0].launchers;
-            let host_part = match p.roots[0].host.as_deref() {
-                Some(h) => format!(" @{h}"),
-                None => String::new(),
-            };
-            if kinds.is_empty() {
-                println!("added: {} -> {}{}", p.id, p.roots[0].path, host_part);
+            if let Some(r) = p.roots.first() {
+                let host_part = match r.host.as_deref() {
+                    Some(h) => format!(" @{h}"),
+                    None => String::new(),
+                };
+                if r.launchers.is_empty() {
+                    println!("added: {} -> {}{}", p.id, r.path, host_part);
+                } else {
+                    println!("added: {} -> {}{} (launchers: {})", p.id, r.path, host_part, r.launchers.join(", "));
+                }
             } else {
-                println!(
-                    "added: {} -> {}{} (launchers: {})",
-                    p.id,
-                    p.roots[0].path,
-                    host_part,
-                    kinds.join(", "),
-                );
+                println!("added: {}", p.id);
             }
         }
         Cmd::List { json } => {
@@ -273,7 +270,8 @@ fn main() -> Result<()> {
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            println!("forgot: {} (was rooted at {})", p.id, p.roots[0].path);
+            let root_path = p.roots.first().map(|r| r.path.as_str()).unwrap_or("?");
+            println!("forgot: {} (was rooted at {})", p.id, root_path);
         }
         Cmd::Rename { from, to } => {
             let payload = call(Request::Rename {
@@ -400,25 +398,18 @@ fn main() -> Result<()> {
             let Payload::Project(p) = payload else {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
-            let kinds = &p.roots[0].launchers;
-            let host_part = match p.roots[0].host.as_deref() {
-                Some(h) => format!(" @{h}"),
-                None => String::new(),
-            };
-            if kinds.is_empty() {
-                println!(
-                    "promoted: {} -> {}{} (workspace: '{}')",
-                    p.id, p.roots[0].path, host_part, p.workspace_name
-                );
+            if let Some(r) = p.roots.first() {
+                let host_part = match r.host.as_deref() {
+                    Some(h) => format!(" @{h}"),
+                    None => String::new(),
+                };
+                if r.launchers.is_empty() {
+                    println!("promoted: {} -> {}{} (workspace: '{}')", p.id, r.path, host_part, p.workspace_name);
+                } else {
+                    println!("promoted: {} -> {}{} (workspace: '{}', launchers: {})", p.id, r.path, host_part, p.workspace_name, r.launchers.join(", "));
+                }
             } else {
-                println!(
-                    "promoted: {} -> {}{} (workspace: '{}', launchers: {})",
-                    p.id,
-                    p.roots[0].path,
-                    host_part,
-                    p.workspace_name,
-                    kinds.join(", "),
-                );
+                println!("promoted: {} (workspace: '{}')", p.id, p.workspace_name);
             }
         }
         Cmd::Status => {
@@ -648,9 +639,13 @@ fn find_session_slug(session_id: &str) -> Option<String> {
         let file = std::fs::File::open(&jsonl).ok()?;
         let len = file.metadata().ok()?.len();
         let read_from = if len > 4096 { len - 4096 } else { 0 };
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = file;
+        use std::io::{BufRead, Read, Seek, SeekFrom};
+        let mut f = std::io::BufReader::new(file);
         f.seek(SeekFrom::Start(read_from)).ok()?;
+        if read_from > 0 {
+            let mut partial = String::new();
+            let _ = f.read_line(&mut partial);
+        }
         let mut tail = String::new();
         f.read_to_string(&mut tail).ok()?;
         // Find last complete line with a slug.
