@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "agorad"
-path = "src/bin/agorad.rs"
+path = "src/bin/agorad/main.rs"
 
 [[bin]]
 name = "agora"
