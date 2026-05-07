@@ -152,10 +152,12 @@ WlrLayershell {
 
         // ── PROJECTS section ──
         if (root.mode === "projects") {
-        items.push({ type: "section", label: "PROJECTS" })
-        for (const p of projects) {
+        const focusedWs = workspaces.find(ws => ws.is_focused)
+        const focusedWsName = focusedWs?.name || ""
+
+        function makeProjectEntry(p) {
             const r = p.roots[p.default_root || 0]
-            const entry = {
+            return {
                 type: "project",
                 name: p.name,
                 host: r.host || "",
@@ -168,8 +170,29 @@ WlrLayershell {
                 launchers: r.launchers || [],
                 ts: p.ts_last_active || 0
             }
-            if (!q || entry.name.toLowerCase().includes(q) || entry.path.toLowerCase().includes(q))
+        }
+        function matchProject(entry) {
+            return !q || entry.name.toLowerCase().includes(q) || entry.path.toLowerCase().includes(q)
+        }
+
+        const currentProject = focusedWsName ? projects.find(p => p.workspace_name === focusedWsName) : null
+        if (currentProject) {
+            const entry = makeProjectEntry(currentProject)
+            if (matchProject(entry)) {
+                items.push({ type: "section", label: "CURRENT" })
                 items.push(entry)
+            }
+        }
+
+        const rest = projects.filter(p => !currentProject || p.id !== currentProject.id)
+        if (rest.length > 0) {
+            let pushed = false
+            for (const p of rest) {
+                const entry = makeProjectEntry(p)
+                if (!matchProject(entry)) continue
+                if (!pushed) { items.push({ type: "section", label: "PROJECTS" }); pushed = true }
+                items.push(entry)
+            }
         }
 
         } // end projects mode
