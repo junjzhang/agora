@@ -241,10 +241,11 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         entry.last_prompt = Some(p);
     }
 
-    if entry.phase != new_phase {
+    let old_phase = entry.phase;
+    if old_phase != new_phase {
         tracing::info!(
             session = %session_id,
-            from = ?entry.phase,
+            from = ?old_phase,
             to = ?new_phase,
             event = %event,
             "agent phase change",
@@ -252,6 +253,49 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         entry.phase = new_phase;
         entry.last_change = now;
     }
+
+    let should_notify = inner.config.notify
+        && old_phase != new_phase
+        && old_phase == AgentPhase::Running
+        && matches!(
+            new_phase,
+            AgentPhase::WaitingInput | AgentPhase::WaitingPermission | AgentPhase::Idle
+        );
+    if !should_notify {
+        return;
+    }
+
+    let entry = inner.agents.get(&session_id).unwrap();
+    let proj = entry.cwd.as_deref().and_then(|c| {
+        let host = match entry.host.as_deref() {
+            None => None,
+            Some(h) if Some(h) == read_local_hostname().as_deref() => None,
+            Some(h) => Some(h),
+        };
+        match_cwd_to_project(c, host, &inner.projects)
+    });
+    let name = proj
+        .as_deref()
+        .or(entry.slug.as_deref())
+        .unwrap_or(&session_id[..8.min(session_id.len())]);
+    let title = format!("agora: {name}");
+    let body: String = match new_phase {
+        AgentPhase::WaitingInput => entry
+            .last_message
+            .clone()
+            .unwrap_or_else(|| "Needs your input".into()),
+        AgentPhase::WaitingPermission => "Needs permission to proceed".into(),
+        AgentPhase::Idle => "Turn complete".into(),
+        _ => return,
+    };
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("notify-send")
+            .args(["-a", "agora", &title, &body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    });
 }
 
 pub(crate) fn focus_agent(state: &State, session_id: &str) -> Result<()> {

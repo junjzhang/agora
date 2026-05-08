@@ -109,14 +109,22 @@ fn argv(parts: &[&str]) -> Vec<String> {
 pub(crate) struct AgoraConfig {
     #[serde(default)]
     pub cleanup_all_workspaces: bool,
+    #[serde(default = "default_true")]
+    pub notify: bool,
     #[serde(default)]
     pub launcher_patches: BTreeMap<String, LauncherPatch>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Default, Deserialize)]
 struct ConfigToml {
     #[serde(default)]
     cleanup_all_workspaces: Option<bool>,
+    #[serde(default)]
+    notify: Option<bool>,
     #[serde(default)]
     launchers: BTreeMap<String, LauncherPatch>,
 }
@@ -194,6 +202,7 @@ pub(crate) fn load_config() -> Result<AgoraConfig> {
         return match toml::from_str::<ConfigToml>(&buf) {
             Ok(config) => Ok(AgoraConfig {
                 cleanup_all_workspaces: config.cleanup_all_workspaces.unwrap_or(false),
+                notify: config.notify.unwrap_or(true),
                 launcher_patches: config.launchers,
             }),
             Err(error) => {
@@ -227,6 +236,7 @@ pub(crate) fn load_config() -> Result<AgoraConfig> {
             }
             Ok(AgoraConfig {
                 cleanup_all_workspaces: config.cleanup_all_workspaces,
+                notify: true,
                 launcher_patches,
             })
         }
