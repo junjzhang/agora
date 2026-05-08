@@ -293,11 +293,16 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         _ => return,
     };
     let sid = session_id.clone();
+    let agora_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("agora")))
+        .unwrap_or_else(|| std::path::PathBuf::from("agora"));
     std::thread::spawn(move || {
         let script = format!(
-            "ACTION=$(notify-send -a agora -A focus=Focus '{}' '{}') && [ \"$ACTION\" = focus ] && agora focus-agent '{}'",
+            "ACTION=$(notify-send -a agora -A focus=Focus '{}' '{}') && [ \"$ACTION\" = focus ] && '{}' focus-agent '{}'",
             title.replace('\'', "'\\''"),
             body.replace('\'', "'\\''"),
+            agora_bin.display(),
             sid,
         );
         let _ = std::process::Command::new("sh")
