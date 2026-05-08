@@ -347,16 +347,13 @@ pub(crate) fn focus_agent(state: &State, session_id: &str) -> Result<()> {
                     .map(|p| p.workspace_name.clone())
             })
         };
+        let host_str = agent_host.as_deref().unwrap_or("");
         if let Some(name) = ws_name {
             let action = NiriAction::FocusWorkspace {
                 reference: WorkspaceReferenceArg::Name(name),
             };
-            match niri_call(NiriRequest::Action(action))? {
-                NiriResponse::Handled => return Ok(()),
-                other => bail!("unexpected niri response: {other:?}"),
-            }
+            let _ = niri_call(NiriRequest::Action(action));
         }
-        let host_str = agent_host.as_deref().unwrap_or("");
         let window_id = {
             let inner = state.lock().unwrap();
             find_window_with_ssh_to(&inner.claims, host_str)
