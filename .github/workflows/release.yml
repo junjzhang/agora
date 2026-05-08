@@ -28,6 +28,8 @@ jobs:
           mkdir -p "${ARCHIVE}"
           cp target/release/agora target/release/agorad "${ARCHIVE}/"
           cp dist/agorad.service "${ARCHIVE}/"
+          cp -r ui/picker "${ARCHIVE}/agora-picker"
+          cp -r ui/dms-plugins/agoraWorkspaces "${ARCHIVE}/agoraWorkspaces"
           cp README.md LICENSE* "${ARCHIVE}/" 2>/dev/null || true
           tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
           echo "ARCHIVE=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
