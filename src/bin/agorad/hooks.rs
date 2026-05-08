@@ -278,7 +278,11 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         .as_deref()
         .or(entry.slug.as_deref())
         .unwrap_or(&session_id[..8.min(session_id.len())]);
-    let title = format!("agora: {name}");
+    let cli_label = match entry.cli {
+        AgentCli::Claude => "claude",
+        AgentCli::Codex => "codex",
+    };
+    let title = format!("agora: {name} ({cli_label})");
     let body: String = match new_phase {
         AgentPhase::WaitingInput => entry
             .last_message
