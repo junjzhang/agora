@@ -171,7 +171,7 @@ pub(crate) fn status(state: &State) -> Payload {
         .collect();
     windows.sort_by_key(|w| (w.workspace_id, w.column, w.window_id));
     let mut agents: Vec<AgentSession> = inner.agents.values().cloned().collect();
-    agents.sort_by(|a, b| b.last_change.cmp(&a.last_change));
+    agents.sort_by_key(|a| std::cmp::Reverse(a.last_change));
     Payload::Status {
         project_count: inner.projects.len(),
         windows,

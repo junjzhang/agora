@@ -241,7 +241,7 @@ fn main() -> Result<()> {
                 anyhow::bail!("unexpected payload from daemon: {payload:?}");
             };
             // MRU order: most recently active first.
-            projects.sort_by(|a, b| b.ts_last_active.cmp(&a.ts_last_active));
+            projects.sort_by_key(|p| std::cmp::Reverse(p.ts_last_active));
             if json {
                 serde_json::to_writer(std::io::stdout(), &projects)
                     .context("serialize projects")?;
