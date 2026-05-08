@@ -714,19 +714,36 @@ fn read_hostname() -> Option<String> {
 }
 
 fn read_cli_settings(cli: &str) -> Option<serde_json::Value> {
-    let path = hook_settings_path(cli).ok()?;
-    let buf = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&buf).ok()
+    let home = std::env::var_os("HOME")?;
+    let base = std::path::PathBuf::from(home);
+    let dir = match cli {
+        "claude" => base.join(".claude"),
+        "codex" => base.join(".codex"),
+        _ => return None,
+    };
+    let main: serde_json::Value = std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    let local: serde_json::Value = std::fs::read_to_string(dir.join("settings.local.json"))
+        .ok()
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    let mut merged = main;
+    if let (Some(m), Some(l)) = (merged.as_object_mut(), local.as_object()) {
+        for (k, v) in l {
+            m.insert(k.clone(), v.clone());
+        }
+    }
+    Some(merged)
 }
 
-/// `~/.claude/settings.json` for claude. Codex path differs but the install
-/// surface is the same (settings.json + hooks).
 fn hook_settings_path(cli: &str) -> Result<std::path::PathBuf> {
     let home = std::env::var_os("HOME").context("HOME not set")?;
     let base = std::path::PathBuf::from(home);
     match cli {
-        "claude" => Ok(base.join(".claude").join("settings.json")),
-        "codex" => Ok(base.join(".codex").join("settings.json")),
+        "claude" => Ok(base.join(".claude").join("settings.local.json")),
+        "codex" => Ok(base.join(".codex").join("settings.local.json")),
         other => anyhow::bail!("unknown cli '{other}' (expected claude|codex)"),
     }
 }
