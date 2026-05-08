@@ -259,7 +259,7 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         && old_phase == AgentPhase::Running
         && matches!(
             new_phase,
-            AgentPhase::WaitingInput | AgentPhase::WaitingPermission | AgentPhase::Idle
+            AgentPhase::WaitingInput | AgentPhase::WaitingPermission
         );
     if !should_notify {
         return;
@@ -289,7 +289,6 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
             .clone()
             .unwrap_or_else(|| "Needs your input".into()),
         AgentPhase::WaitingPermission => "Needs permission to proceed".into(),
-        AgentPhase::Idle => "Turn complete".into(),
         _ => return,
     };
     let sid = session_id.clone();
