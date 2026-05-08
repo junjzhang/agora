@@ -48,7 +48,6 @@ fn apply_event(state: &State, event: Event) {
                             name: w.name.clone(),
                             is_active: w.is_active,
                             is_focused: w.is_focused,
-                            output: w.output.clone(),
                         },
                     )
                 })

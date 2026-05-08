@@ -6,7 +6,9 @@ use agora::ipc::{ActionSummary, ActionTarget};
 use agora::model::AgentCli;
 
 use crate::hooks::project_has_agent;
-use crate::launcher::{launcher_available_for_root, launcher_command_with_args, shell_quote, spawn_detached_command};
+use crate::launcher::{
+    launcher_available_for_root, launcher_command_with_args, shell_quote, spawn_detached_command,
+};
 use crate::project::{attach, forget, open};
 use crate::State;
 
@@ -17,7 +19,10 @@ struct OrderedAction {
     summary: ActionSummary,
 }
 
-pub(crate) fn actions_for_target(state: &State, target: ActionTarget) -> Result<Vec<ActionSummary>> {
+pub(crate) fn actions_for_target(
+    state: &State,
+    target: ActionTarget,
+) -> Result<Vec<ActionSummary>> {
     match target {
         ActionTarget::Project { id } => project_actions(state, &id),
     }

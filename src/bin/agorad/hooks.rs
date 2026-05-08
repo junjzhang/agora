@@ -3,12 +3,14 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use niri_ipc::{Action as NiriAction, Request as NiriRequest, Response as NiriResponse, WorkspaceReferenceArg};
+use niri_ipc::{
+    Action as NiriAction, Request as NiriRequest, Response as NiriResponse, WorkspaceReferenceArg,
+};
 
 use agora::model::{AgentCli, AgentPhase, AgentSession, Project};
 
-use crate::niri::niri_call;
 use crate::launcher::truncate_str;
+use crate::niri::niri_call;
 use crate::{Claim, Inner, State};
 
 pub(crate) fn agents(state: &State) -> Vec<AgentSession> {
@@ -153,7 +155,12 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
     }
 
     let model = payload
-        .get("model")
+        .get("agora_model")
+        .or_else(|| payload.get("model"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let effort = payload
+        .get("agora_effort")
         .and_then(|v| v.as_str())
         .map(String::from);
     let tool_name = payload
@@ -181,6 +188,7 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
             started_at: Some(now),
             turn_count: 0,
             current_tool: None,
+            effort: None,
         }
     });
 
@@ -198,6 +206,9 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
     }
     if model.is_some() {
         entry.model = model;
+    }
+    if effort.is_some() {
+        entry.effort = effort;
     }
     if event == "SessionStart" && entry.started_at.is_none() {
         entry.started_at = Some(now);

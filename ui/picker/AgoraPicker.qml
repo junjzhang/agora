@@ -209,7 +209,8 @@ WlrLayershell {
                     startedAt: a.started_at || 0,
                     turnCount: a.turn_count || 0,
                     currentTool: a.current_tool || "",
-                    lastChange: a.last_change || 0
+                    lastChange: a.last_change || 0,
+                    effort: a.effort || ""
                 })
             }
 
@@ -290,7 +291,10 @@ WlrLayershell {
         if (m.includes("opus")) return "#E0A0FF"
         if (m.includes("sonnet")) return "#7EC8E3"
         if (m.includes("haiku")) return "#A8D5A2"
-        if (m.includes("gpt")) return "#74AA9C"
+        if (m.includes("gpt-5")) return "#FF8C69"
+        if (m.includes("gpt-4")) return "#74AA9C"
+        if (m.includes("o3") || m.includes("o4")) return "#FFD700"
+        if (m.includes("gpt") || m.includes("codex")) return "#74AA9C"
         return "#ccc"
     }
 
@@ -764,6 +768,34 @@ WlrLayershell {
                                                 color: "#888"
                                             }
                                         }
+                                        Rectangle {
+                                            visible: !root.actionMode && !!(listItem.modelData.model)
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: itemModelLabel.implicitWidth + 8; height: 16; radius: 4
+                                            color: Qt.rgba(root.modelColor(listItem.modelData.model || "").r || 0.5,
+                                                           root.modelColor(listItem.modelData.model || "").g || 0.5,
+                                                           root.modelColor(listItem.modelData.model || "").b || 0.5, 0.12)
+                                            Text {
+                                                id: itemModelLabel
+                                                anchors.centerIn: parent
+                                                text: root.shortModel(listItem.modelData.model || "")
+                                                font.pixelSize: 10
+                                                color: root.modelColor(listItem.modelData.model || "")
+                                            }
+                                        }
+                                        Rectangle {
+                                            visible: !root.actionMode && !!(listItem.modelData.effort)
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: itemEffortLabel.implicitWidth + 8; height: 16; radius: 4
+                                            color: Qt.rgba(1, 1, 1, 0.06)
+                                            Text {
+                                                id: itemEffortLabel
+                                                anchors.centerIn: parent
+                                                text: listItem.modelData.effort || ""
+                                                font.pixelSize: 10
+                                                color: "#888"
+                                            }
+                                        }
                                     }
                                     Text {
                                         visible: !!(listItem.modelData.currentTool) || !!(listItem.modelData.lastPrompt)
@@ -997,8 +1029,9 @@ WlrLayershell {
                                 Row {
                                     width: parent.width
                                     spacing: 8
-                                    visible: !!(root.selectedItem?.model)
+                                    visible: !!(root.selectedItem?.model) || !!(root.selectedItem?.effort)
                                     Rectangle {
+                                        visible: !!(root.selectedItem?.model)
                                         width: modelLabel.implicitWidth + 12; height: 22; radius: 4
                                         color: Qt.rgba(root.modelColor(root.selectedItem?.model || "").r || 0.5,
                                                        root.modelColor(root.selectedItem?.model || "").g || 0.5,
@@ -1012,6 +1045,20 @@ WlrLayershell {
                                             font.pixelSize: 12
                                             font.weight: Font.Medium
                                             font.family: "monospace"
+                                        }
+                                    }
+                                    Rectangle {
+                                        visible: !!(root.selectedItem?.effort)
+                                        width: effortLabel.implicitWidth + 12; height: 22; radius: 4
+                                        color: Qt.rgba(1, 1, 1, 0.06)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        Text {
+                                            id: effortLabel
+                                            anchors.centerIn: parent
+                                            text: root.selectedItem?.effort || ""
+                                            color: "#aaa"
+                                            font.pixelSize: 12
+                                            font.weight: Font.Medium
                                         }
                                     }
                                 }

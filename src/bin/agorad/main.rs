@@ -45,7 +45,6 @@ pub(crate) struct WorkspaceInfo {
     pub name: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
-    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,9 +186,7 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         Request::Forget { name } => Ok(Payload::Project(project::forget(state, name)?)),
         Request::Rename { from, to } => project::rename(state, from, to),
         Request::Get { name } => Ok(Payload::Project(project::get(state, name)?)),
-        Request::Update { name, spec } => {
-            Ok(Payload::Project(project::update(state, name, spec)?))
-        }
+        Request::Update { name, spec } => Ok(Payload::Project(project::update(state, name, spec)?)),
         Request::Promote {
             name,
             root_path,
@@ -211,9 +208,9 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             Ok(Payload::Ack)
         }
         Request::Agents => Ok(Payload::Agents(hooks::agents(state))),
-        Request::RemoteAdd { host, remote_uid } => {
-            Ok(Payload::Remote(tunnel::remote_add(state, host, remote_uid)?))
-        }
+        Request::RemoteAdd { host, remote_uid } => Ok(Payload::Remote(tunnel::remote_add(
+            state, host, remote_uid,
+        )?)),
         Request::RemoteRemove { host } => {
             tunnel::remote_remove(state, host)?;
             Ok(Payload::Ack)
@@ -223,9 +220,9 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             hooks::focus_agent(state, &session_id)?;
             Ok(Payload::Ack)
         }
-        Request::Actions { target } => {
-            Ok(Payload::Actions(actions::actions_for_target(state, target)?))
-        }
+        Request::Actions { target } => Ok(Payload::Actions(actions::actions_for_target(
+            state, target,
+        )?)),
         Request::RunAction { target, action_id } => {
             actions::run_action(state, target, &action_id)?;
             Ok(Payload::Ack)

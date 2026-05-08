@@ -223,7 +223,13 @@ fn main() -> Result<()> {
                 if r.launchers.is_empty() {
                     println!("added: {} -> {}{}", p.id, r.path, host_part);
                 } else {
-                    println!("added: {} -> {}{} (launchers: {})", p.id, r.path, host_part, r.launchers.join(", "));
+                    println!(
+                        "added: {} -> {}{} (launchers: {})",
+                        p.id,
+                        r.path,
+                        host_part,
+                        r.launchers.join(", ")
+                    );
                 }
             } else {
                 println!("added: {}", p.id);
@@ -411,9 +417,19 @@ fn main() -> Result<()> {
                     None => String::new(),
                 };
                 if r.launchers.is_empty() {
-                    println!("promoted: {} -> {}{} (workspace: '{}')", p.id, r.path, host_part, p.workspace_name);
+                    println!(
+                        "promoted: {} -> {}{} (workspace: '{}')",
+                        p.id, r.path, host_part, p.workspace_name
+                    );
                 } else {
-                    println!("promoted: {} -> {}{} (workspace: '{}', launchers: {})", p.id, r.path, host_part, p.workspace_name, r.launchers.join(", "));
+                    println!(
+                        "promoted: {} -> {}{} (workspace: '{}', launchers: {})",
+                        p.id,
+                        r.path,
+                        host_part,
+                        p.workspace_name,
+                        r.launchers.join(", ")
+                    );
                 }
             } else {
                 println!("promoted: {} (workspace: '{}')", p.id, p.workspace_name);
@@ -610,6 +626,20 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
                 );
             }
         }
+        if !obj.contains_key("agora_model") || !obj.contains_key("agora_effort") {
+            if let Some(settings) = read_cli_settings(cli) {
+                if !obj.contains_key("agora_model") {
+                    if let Some(m) = settings.get("model").and_then(|v| v.as_str()) {
+                        obj.insert("agora_model".into(), serde_json::Value::String(m.into()));
+                    }
+                }
+                if !obj.contains_key("agora_effort") {
+                    if let Some(e) = settings.get("effortLevel").and_then(|v| v.as_str()) {
+                        obj.insert("agora_effort".into(), serde_json::Value::String(e.into()));
+                    }
+                }
+            }
+        }
     }
     // Fire-and-forget: send and don't fail the hook on daemon error.
     // Hook scripts must exit cleanly so the agent CLI keeps moving.
@@ -645,7 +675,7 @@ fn find_session_slug(session_id: &str) -> Option<String> {
         // Read last few KB to find slug — don't parse the whole file.
         let file = std::fs::File::open(&jsonl).ok()?;
         let len = file.metadata().ok()?.len();
-        let read_from = if len > 4096 { len - 4096 } else { 0 };
+        let read_from = len.saturating_sub(4096);
         use std::io::{BufRead, Read, Seek, SeekFrom};
         let mut f = std::io::BufReader::new(file);
         f.seek(SeekFrom::Start(read_from)).ok()?;
@@ -681,6 +711,12 @@ fn read_hostname() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn read_cli_settings(cli: &str) -> Option<serde_json::Value> {
+    let path = hook_settings_path(cli).ok()?;
+    let buf = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&buf).ok()
 }
 
 /// `~/.claude/settings.json` for claude. Codex path differs but the install

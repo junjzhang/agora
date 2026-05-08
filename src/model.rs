@@ -157,4 +157,7 @@ pub struct AgentSession {
     /// Tool currently being executed (set on PreToolUse, cleared on PostToolUse/Stop).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<String>,
+    /// Effort/thinking level from CLI settings (e.g. "xhigh", "high", "low").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }

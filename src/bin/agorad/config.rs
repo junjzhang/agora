@@ -352,23 +352,46 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
         LauncherTemplate::new("Open terminal", "OPEN")
             .local(&["kitty", "--directory", "{path}"])
             .remote(&[
-                "kitty", "+kitten", "ssh", "-R", "7897:127.0.0.1:7890", "{host}", "-t",
+                "kitty",
+                "+kitten",
+                "ssh",
+                "-R",
+                "7897:127.0.0.1:7890",
+                "{host}",
+                "-t",
                 "cd {path}; exec /usr/bin/zsh",
             ])
-            .action("open", LauncherAction::new("Open terminal", "OPEN", 10).key("⌥T")),
+            .action(
+                "open",
+                LauncherAction::new("Open terminal", "OPEN", 10).key("⌥T"),
+            ),
     );
     registry.insert(
         "claude".into(),
         LauncherTemplate::new("Claude", "AGENT")
             .local(&[
-                "kitty", "--directory", "{path}", "--", "zsh", "-ic",
+                "kitty",
+                "--directory",
+                "{path}",
+                "--",
+                "zsh",
+                "-ic",
                 "claude {args}; exec zsh",
             ])
             .remote(&[
-                "kitty", "+kitten", "ssh", "-R", "7897:127.0.0.1:7890", "{host}", "-t",
+                "kitty",
+                "+kitten",
+                "ssh",
+                "-R",
+                "7897:127.0.0.1:7890",
+                "{host}",
+                "-t",
                 "cd {path}; claude {args}; exec /usr/bin/zsh",
             ])
-            .action("new", LauncherAction::new("New Claude", "AGENT", 10).key("⌥N"))
+            .action(
+                "new",
+                LauncherAction::new("New Claude", "AGENT", 10).key("⌥N"),
+            )
             .action(
                 "continue",
                 LauncherAction::new("Continue Claude", "AGENT", 20)
@@ -388,14 +411,28 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
         "codex".into(),
         LauncherTemplate::new("Codex", "AGENT")
             .local(&[
-                "kitty", "--directory", "{path}", "--", "zsh", "-ic",
+                "kitty",
+                "--directory",
+                "{path}",
+                "--",
+                "zsh",
+                "-ic",
                 "codex {args}; exec zsh",
             ])
             .remote(&[
-                "kitty", "+kitten", "ssh", "-R", "7897:127.0.0.1:7890", "{host}", "-t",
+                "kitty",
+                "+kitten",
+                "ssh",
+                "-R",
+                "7897:127.0.0.1:7890",
+                "{host}",
+                "-t",
                 "cd {path}; codex {args}; exec /usr/bin/zsh",
             ])
-            .action("new", LauncherAction::new("New Codex", "AGENT", 40).key("⌥X"))
+            .action(
+                "new",
+                LauncherAction::new("New Codex", "AGENT", 40).key("⌥X"),
+            )
             .action(
                 "continue",
                 LauncherAction::new("Continue Codex", "AGENT", 50)
@@ -414,8 +451,15 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
         "vscode".into(),
         LauncherTemplate::new("Open VS Code", "OPEN")
             .local(&["code", "{path}"])
-            .remote(&["code", "--folder-uri", "vscode-remote://ssh-remote+{host}{path}"])
-            .action("open", LauncherAction::new("Open VS Code", "OPEN", 20).key("⌥V")),
+            .remote(&[
+                "code",
+                "--folder-uri",
+                "vscode-remote://ssh-remote+{host}{path}",
+            ])
+            .action(
+                "open",
+                LauncherAction::new("Open VS Code", "OPEN", 20).key("⌥V"),
+            ),
     );
     registry.insert(
         "zed".into(),

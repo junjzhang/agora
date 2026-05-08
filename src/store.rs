@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -59,8 +59,8 @@ pub fn load() -> Result<Vec<Project>> {
         return Ok(Vec::new());
     }
 
-    let value: Value = serde_json::from_str(&buf)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let value: Value =
+        serde_json::from_str(&buf).with_context(|| format!("parse {}", path.display()))?;
 
     if let Some(obj) = value.as_object() {
         if let Some(version) = obj.get("version").and_then(Value::as_u64) {
@@ -122,8 +122,8 @@ pub fn load_remotes() -> Result<Vec<RemoteHost>> {
     if buf.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let env: RemotesEnvelope = serde_json::from_str(&buf)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let env: RemotesEnvelope =
+        serde_json::from_str(&buf).with_context(|| format!("parse {}", path.display()))?;
     if env.version > REMOTES_VERSION {
         bail!(
             "{}: remotes store version {} is newer than this binary supports (max {})",

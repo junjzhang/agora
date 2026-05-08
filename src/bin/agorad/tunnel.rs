@@ -179,7 +179,11 @@ fn sleep_or_shutdown(rx: &std::sync::mpsc::Receiver<()>, secs: u64) -> bool {
     }
 }
 
-pub(crate) fn remote_add(state: &State, host_name: String, remote_uid: u32) -> Result<RemoteSummary> {
+pub(crate) fn remote_add(
+    state: &State,
+    host_name: String,
+    remote_uid: u32,
+) -> Result<RemoteSummary> {
     if host_name.is_empty() {
         bail!("remote host must not be empty");
     }
