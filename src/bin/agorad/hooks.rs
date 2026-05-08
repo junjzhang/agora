@@ -466,16 +466,37 @@ fn find_ssh_host_recursive(pid: i32, depth: u32) -> Option<String> {
 }
 
 pub(crate) fn find_window_with_ssh_to(claims: &HashMap<u64, Claim>, host: &str) -> Option<u64> {
+    let mut fallback = None;
     for (wid, claim) in claims {
         if claim.app_id.as_deref() != Some("kitty") {
             continue;
         }
         let Some(pid) = claim.pid else { continue };
-        if descendant_has_ssh_to(pid, host, 0) {
+        if !descendant_has_ssh_to(pid, host, 0) {
+            continue;
+        }
+        if title_looks_like_agent(claim.title.as_deref()) {
             return Some(*wid);
         }
+        if fallback.is_none() {
+            fallback = Some(*wid);
+        }
     }
-    None
+    fallback
+}
+
+fn title_looks_like_agent(title: Option<&str>) -> bool {
+    let Some(t) = title else { return false };
+    // Claude Code uses braille spinner chars (⠐⠂⠄⡀⢀⠠⠁) or ✳ in terminal title
+    t.starts_with('⠐')
+        || t.starts_with('⠂')
+        || t.starts_with('⠄')
+        || t.starts_with('⡀')
+        || t.starts_with('⢀')
+        || t.starts_with('⠠')
+        || t.starts_with('⠁')
+        || t.starts_with('✳')
+        || t.contains("Claude Code")
 }
 
 fn descendant_has_ssh_to(pid: i32, host: &str, depth: u32) -> bool {
