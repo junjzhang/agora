@@ -292,9 +292,16 @@ fn apply_hook_inner(state: &State, cli_str: &str, event: &str, payload: &serde_j
         AgentPhase::Idle => "Turn complete".into(),
         _ => return,
     };
+    let sid = session_id.clone();
     std::thread::spawn(move || {
-        let _ = std::process::Command::new("notify-send")
-            .args(["-a", "agora", &title, &body])
+        let script = format!(
+            "ACTION=$(notify-send -a agora -A focus=Focus '{}' '{}') && [ \"$ACTION\" = focus ] && agora focus-agent '{}'",
+            title.replace('\'', "'\\''"),
+            body.replace('\'', "'\\''"),
+            sid,
+        );
+        let _ = std::process::Command::new("sh")
+            .args(["-c", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
