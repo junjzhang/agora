@@ -1,5 +1,7 @@
 # agora
 
+> **WIP** — This project is under active development. APIs, config format, and IPC protocol may change without notice.
+
 Agent-era workspace manager for the [niri](https://github.com/YaLTeR/niri) Wayland compositor.
 
 agora maps projects to niri workspaces, tracks AI agent sessions (Claude Code, Codex) via hooks, and provides a keyboard-driven picker for navigating and launching tools.
