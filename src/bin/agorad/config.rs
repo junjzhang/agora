@@ -363,7 +363,8 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             .local(&["kitty", "--directory", "{path}"])
             .remote(&[
                 "kitty",
-                "+kitten",
+                "--",
+                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
@@ -390,7 +391,8 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             ])
             .remote(&[
                 "kitty",
-                "+kitten",
+                "--",
+                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
@@ -431,7 +433,8 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             ])
             .remote(&[
                 "kitty",
-                "+kitten",
+                "--",
+                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
