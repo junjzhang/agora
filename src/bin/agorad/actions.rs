@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use anyhow::{bail, Context, Result};
 
 use agora::ipc::{ActionSummary, ActionTarget};
@@ -7,7 +5,7 @@ use agora::model::AgentCli;
 
 use crate::hooks::project_has_agent;
 use crate::launcher::{
-    launcher_available_for_root, launcher_command_with_args, shell_quote, spawn_detached_command,
+    launcher_available_for_root, launcher_argv_with_args, niri_spawn, shell_quote,
 };
 use crate::project::{attach, forget, open};
 use crate::State;
@@ -179,27 +177,30 @@ fn run_project_action(state: &State, project_id: &str, action_id: &str) -> Resul
 
     match action_id {
         "builtin:copy_path" => {
-            let mut cmd = Command::new("dms");
-            cmd.args(["cl", "copy", &root.path]);
-            spawn_detached_command(cmd, "builtin:copy_path", root)?;
-            return Ok(());
+            return niri_spawn(
+                vec!["dms".into(), "cl".into(), "copy".into(), root.path.clone()],
+                "builtin:copy_path",
+                root,
+            );
         }
         "builtin:edit" => {
             let cmd = format!("agora edit {}; exec zsh", shell_quote(project_id));
-            let mut command = Command::new("kitty");
-            command.args(["zsh", "-ic", &cmd]);
-            spawn_detached_command(command, "builtin:edit", root)?;
-            return Ok(());
+            return niri_spawn(
+                vec!["zsh".into(), "-ic".into(), cmd],
+                "builtin:edit",
+                root,
+            );
         }
         "builtin:rename" => {
             let cmd = format!(
                 "echo {}; exec zsh",
                 shell_quote(&format!("agora rename {project_id} <new-name>"))
             );
-            let mut command = Command::new("kitty");
-            command.args(["zsh", "-ic", &cmd]);
-            spawn_detached_command(command, "builtin:rename", root)?;
-            return Ok(());
+            return niri_spawn(
+                vec!["zsh".into(), "-ic".into(), cmd],
+                "builtin:rename",
+                root,
+            );
         }
         _ => {}
     }
@@ -230,12 +231,9 @@ fn run_project_action(state: &State, project_id: &str, action_id: &str) -> Resul
     {
         bail!("action '{action_id}' is not available");
     }
-    let mut cmd = launcher_command_with_args(launcher_id, root, &registry, &action.args)
+    let argv = launcher_argv_with_args(launcher_id, root, &registry, &action.args)
         .with_context(|| format!("could not build command for action '{action_id}'"))?;
-    if root.host.is_none() {
-        cmd.current_dir(&root.path);
-    }
-    spawn_detached_command(cmd, action_id, root)
+    niri_spawn(argv, action_id, root)
 }
 
 fn ordered_action(

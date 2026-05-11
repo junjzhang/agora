@@ -1,25 +1,25 @@
-use std::process::{Command, Stdio};
-
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
+use niri_ipc::{Action as NiriAction, Request as NiriRequest, Response as NiriResponse};
 
 use agora::model::Root;
 
 use crate::config::{LauncherRegistry, LauncherTemplate};
+use crate::niri::niri_call;
 
-pub(crate) fn launcher_command(
+pub(crate) fn launcher_argv(
     launcher: &str,
     root: &Root,
     registry: &LauncherRegistry,
-) -> Option<Command> {
-    launcher_command_with_args(launcher, root, registry, &[])
+) -> Option<Vec<String>> {
+    launcher_argv_with_args(launcher, root, registry, &[])
 }
 
-pub(crate) fn launcher_command_with_args(
+pub(crate) fn launcher_argv_with_args(
     launcher: &str,
     root: &Root,
     registry: &LauncherRegistry,
     action_args: &[String],
-) -> Option<Command> {
+) -> Option<Vec<String>> {
     let Some(template) = registry.get(launcher) else {
         tracing::warn!(launcher, "unknown launcher; skipping");
         return None;
@@ -52,39 +52,29 @@ pub(crate) fn launcher_command_with_args(
         }
     };
 
-    let mut iter = argv.into_iter();
-    let Some(program) = iter.next() else {
+    if argv.is_empty() {
         tracing::warn!(
             launcher,
             "launcher template expanded to an empty command; skipping"
         );
         return None;
-    };
-    let mut cmd = Command::new(program);
-    cmd.args(iter);
-    Some(cmd)
+    }
+    Some(argv)
 }
 
-pub(crate) fn spawn_detached_command(mut cmd: Command, label: &str, root: &Root) -> Result<()> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawn action '{label}'"))?;
-    let pid = child.id();
+pub(crate) fn niri_spawn(argv: Vec<String>, label: &str, root: &Root) -> Result<()> {
     tracing::info!(
         action = label,
-        pid,
         host = root.host.as_deref().unwrap_or("local"),
         path = %root.path,
-        "spawned action",
+        cmd = %argv.join(" "),
+        "spawning via niri",
     );
-    std::thread::spawn(move || {
-        let mut child = child;
-        let _ = child.wait();
-    });
-    Ok(())
+    let action = NiriAction::Spawn { command: argv };
+    match niri_call(NiriRequest::Action(action))? {
+        NiriResponse::Handled => Ok(()),
+        other => bail!("niri spawn: unexpected response {other:?}"),
+    }
 }
 
 pub(crate) fn expand_launcher_template(

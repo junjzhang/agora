@@ -11,7 +11,7 @@ use agora::model::{Project, ProjectSpec, Root};
 use agora::store;
 
 use crate::hooks::{find_leaf_child, find_ssh_host_in_children};
-use crate::launcher::{launcher_command, spawn_detached_command};
+use crate::launcher::{launcher_argv, niri_spawn};
 use crate::niri::{niri_call, unix_now};
 use crate::State;
 
@@ -628,13 +628,10 @@ fn spawn_launchers(state: &State, project: &Project) {
 }
 
 fn spawn_one(launcher: &str, root: &Root, registry: &crate::config::LauncherRegistry) {
-    let Some(mut cmd) = launcher_command(launcher, root, registry) else {
+    let Some(argv) = launcher_argv(launcher, root, registry) else {
         return;
     };
-    if root.host.is_none() {
-        cmd.current_dir(&root.path);
-    }
-    if let Err(e) = spawn_detached_command(cmd, launcher, root) {
+    if let Err(e) = niri_spawn(argv, launcher, root) {
         tracing::warn!(
             launcher,
             error = %e,

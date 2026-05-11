@@ -364,13 +364,12 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             .remote(&[
                 "kitty",
                 "--",
-                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
                 "{host}",
                 "-t",
-                "cd {path}; exec /usr/bin/zsh",
+                "cd {path}; exec zsh",
             ])
             .action(
                 "open",
@@ -392,13 +391,12 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             .remote(&[
                 "kitty",
                 "--",
-                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
                 "{host}",
                 "-t",
-                "cd {path}; claude {args}; exec /usr/bin/zsh",
+                "cd {path}; exec zsh -ic 'claude {args}; exec zsh'",
             ])
             .action(
                 "new",
@@ -434,13 +432,12 @@ pub(crate) fn default_launcher_registry() -> LauncherRegistry {
             .remote(&[
                 "kitty",
                 "--",
-                "kitten",
                 "ssh",
                 "-R",
                 "7897:127.0.0.1:7890",
                 "{host}",
                 "-t",
-                "cd {path}; codex {args}; exec /usr/bin/zsh",
+                "cd {path}; exec zsh -ic 'codex {args}; exec zsh'",
             ])
             .action(
                 "new",
