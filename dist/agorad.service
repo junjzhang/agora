@@ -9,6 +9,7 @@ Type=simple
 ExecStart=%h/.local/bin/agorad
 Restart=on-failure
 RestartSec=2
+KillMode=process
 
 [Install]
 WantedBy=graphical-session.target
