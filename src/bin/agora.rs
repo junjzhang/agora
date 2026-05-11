@@ -1082,24 +1082,26 @@ fn remote_install(host: &str) -> Result<()> {
         String::from_utf8_lossy(&verify.stdout).trim()
     );
 
-    // 5. install claude hooks on remote (with host alias so agents report SSH alias)
-    let hooks = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", host])
-        .arg(format!(
-            "~/.local/bin/agora hook install --host-alias {host}"
-        ))
-        .output()
-        .context("ssh hook install")?;
-    if !hooks.status.success() {
-        bail!(
-            "remote hook install failed: {}",
-            String::from_utf8_lossy(&hooks.stderr).trim()
+    // 5. install hooks for all supported CLIs on remote
+    for cli in ["claude", "codex"] {
+        let hooks = Command::new("ssh")
+            .args(["-o", "BatchMode=yes", host])
+            .arg(format!(
+                "~/.local/bin/agora hook install --cli {cli} --host-alias {host}"
+            ))
+            .output()
+            .with_context(|| format!("ssh hook install --cli {cli}"))?;
+        if !hooks.status.success() {
+            bail!(
+                "remote hook install --cli {cli} failed: {}",
+                String::from_utf8_lossy(&hooks.stderr).trim()
+            );
+        }
+        println!(
+            "hook install ({cli}): {}",
+            String::from_utf8_lossy(&hooks.stdout).trim()
         );
     }
-    println!(
-        "hook install: {}",
-        String::from_utf8_lossy(&hooks.stdout).trim()
-    );
 
     // 6. register the host with the local daemon (idempotent: re-add updates)
     let payload = call(Request::RemoteAdd {
