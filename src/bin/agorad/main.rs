@@ -43,6 +43,7 @@ pub(crate) struct Inner {
 pub(crate) struct WorkspaceInfo {
     pub idx: u8,
     pub name: Option<String>,
+    pub output: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
 }

@@ -46,12 +46,26 @@ fn apply_event(state: &State, event: Event) {
                         WorkspaceInfo {
                             idx: w.idx,
                             name: w.name.clone(),
+                            output: w.output.clone(),
                             is_active: w.is_active,
                             is_focused: w.is_focused,
                         },
                     )
                 })
                 .collect();
+        }
+        Event::WorkspaceActivated { id, focused } => {
+            let mut inner = state.lock().unwrap();
+            let output = inner.workspaces.get(&id).and_then(|w| w.output.clone());
+            for (&ws_id, ws) in inner.workspaces.iter_mut() {
+                let got_activated = ws_id == id;
+                if ws.output == output {
+                    ws.is_active = got_activated;
+                }
+                if focused {
+                    ws.is_focused = got_activated;
+                }
+            }
         }
         Event::WindowsChanged { windows } => {
             let mut new_claims: HashMap<u64, Claim> = HashMap::with_capacity(windows.len());
