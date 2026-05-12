@@ -27,8 +27,13 @@ impl LocalBackend {
 }
 
 impl AgentBackend for LocalBackend {
-    fn apply_hook(&mut self, event: &str, payload: &Value) -> Option<NotifyRequest> {
-        apply_hook(&mut self.agents, event, payload)
+    fn apply_hook(
+        &mut self,
+        cli: AgentCli,
+        event: &str,
+        payload: &Value,
+    ) -> Option<NotifyRequest> {
+        apply_hook(&mut self.agents, cli, event, payload)
     }
 
     fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {
@@ -108,17 +113,10 @@ fn enrich(a: &AgentSession, ctx: &EnrichCtx) -> AgentSession {
 /// passed-in agents map. Used by both LocalBackend and RemoteBackend.
 pub(crate) fn apply_hook(
     agents: &mut HashMap<String, AgentSession>,
+    cli: AgentCli,
     event: &str,
     payload: &Value,
 ) -> Option<NotifyRequest> {
-    let cli_str = payload.get("cli").and_then(|v| v.as_str());
-    // cli is passed separately in dispatch — but inside apply_hook we want it
-    // from the payload's `agora_cli` if present (legacy: dispatch passes it).
-    // For consistency we accept either path; callers should ensure payload.cli
-    // is set if they want it captured. Default to the existing entry's cli or
-    // claude.
-    let _ = cli_str;
-
     let session_id = payload
         .get("session_id")
         .and_then(|v| v.as_str())?
@@ -152,10 +150,6 @@ pub(crate) fn apply_hook(
         .get("tool_name")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let cli_kind = payload
-        .get("agora_cli_kind")
-        .and_then(|v| v.as_str())
-        .map(String::from);
 
     let message = if event == "Notification" {
         payload
@@ -184,17 +178,15 @@ pub(crate) fn apply_hook(
         return None;
     }
 
-    let cli_kind = cli_kind.as_deref().unwrap_or("claude");
-    let agent_cli = match cli_kind {
-        "codex" => AgentCli::Codex,
-        _ => AgentCli::Claude,
-    };
-
     let entry = agents.entry(session_id.clone()).or_insert_with(|| {
-        tracing::info!(session = %session_id, cli = %cli_kind, "agent session registered");
+        let cli_label = match cli {
+            AgentCli::Claude => "claude",
+            AgentCli::Codex => "codex",
+        };
+        tracing::info!(session = %session_id, cli = %cli_label, "agent session registered");
         AgentSession {
             session_id: session_id.clone(),
-            cli: agent_cli,
+            cli,
             phase: AgentPhase::Idle,
             cwd: cwd.clone(),
             last_event: None,

@@ -22,19 +22,6 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
         }
     };
 
-    // Inject cli kind into payload so the backend's apply_hook can record it.
-    let mut payload = payload.clone();
-    if let Some(obj) = payload.as_object_mut() {
-        let kind = match cli_kind {
-            AgentCli::Claude => "claude",
-            AgentCli::Codex => "codex",
-        };
-        obj.insert(
-            "agora_cli_kind".into(),
-            serde_json::Value::String(kind.into()),
-        );
-    }
-
     let agora_host = payload
         .get("agora_host")
         .and_then(|v| v.as_str())
@@ -46,10 +33,10 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
         _ => false,
     };
 
-    let notify = {
+    let (notify, notify_enabled) = {
         let mut inner = state.lock().unwrap();
-        if is_local {
-            inner.local.apply_hook(event, &payload)
+        let notify = if is_local {
+            inner.local.apply_hook(cli_kind, event, payload)
         } else {
             let host = agora_host.clone().unwrap();
             let remote = inner.remotes.entry(host.clone()).or_insert_with(|| {
@@ -61,11 +48,11 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
                     auto_connect: false,
                 })
             });
-            remote.apply_hook(event, &payload)
-        }
+            remote.apply_hook(cli_kind, event, payload)
+        };
+        (notify, inner.config.notify)
     };
 
-    let notify_enabled = state.lock().unwrap().config.notify;
     if notify_enabled {
         if let Some(req) = notify {
             spawn_notification(req);
@@ -78,16 +65,11 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
 }
 
 pub(crate) fn list(state: &State) -> Vec<AgentSession> {
-    // Prune dead local sessions before listing.
-    {
-        let mut inner = state.lock().unwrap();
-        inner.local.prune();
-        for remote in inner.remotes.values_mut() {
-            remote.prune();
-        }
+    let mut inner = state.lock().unwrap();
+    inner.local.prune();
+    for remote in inner.remotes.values_mut() {
+        remote.prune();
     }
-
-    let inner = state.lock().unwrap();
     let ctx = EnrichCtx {
         projects: &inner.projects,
         claims: &inner.claims,

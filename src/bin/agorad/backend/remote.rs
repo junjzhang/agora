@@ -43,8 +43,13 @@ impl RemoteBackend {
 }
 
 impl AgentBackend for RemoteBackend {
-    fn apply_hook(&mut self, event: &str, payload: &Value) -> Option<NotifyRequest> {
-        apply_hook(&mut self.agents, event, payload)
+    fn apply_hook(
+        &mut self,
+        cli: AgentCli,
+        event: &str,
+        payload: &Value,
+    ) -> Option<NotifyRequest> {
+        apply_hook(&mut self.agents, cli, event, payload)
     }
 
     fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {

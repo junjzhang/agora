@@ -33,7 +33,12 @@ pub(crate) struct NotifyRequest {
 pub(crate) trait AgentBackend {
     /// Update internal state from a hook event. Returns a notification
     /// request if the state transition warrants user attention.
-    fn apply_hook(&mut self, event: &str, payload: &Value) -> Option<NotifyRequest>;
+    fn apply_hook(
+        &mut self,
+        cli: AgentCli,
+        event: &str,
+        payload: &Value,
+    ) -> Option<NotifyRequest>;
 
     /// All sessions owned by this backend, enriched with project + workspace
     /// metadata derived from the provided context.
