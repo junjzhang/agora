@@ -10,9 +10,9 @@ use agora::ipc::Payload;
 use agora::model::{Project, ProjectSpec, Root};
 use agora::store;
 
-use crate::hooks::{find_leaf_child, find_ssh_host_in_children};
 use crate::launcher::{launcher_argv, niri_spawn};
 use crate::niri::{niri_call, unix_now};
+use crate::procutil::{find_leaf_child, find_ssh_host_in_children};
 use crate::State;
 
 pub(crate) fn add(
@@ -246,9 +246,10 @@ pub(crate) fn promote(
                 let remote_cwd = {
                     let inner = state.lock().unwrap();
                     inner
-                        .agents
-                        .values()
-                        .filter(|a| a.host.as_deref() == Some(&ssh_host))
+                        .remotes
+                        .get(&ssh_host)
+                        .into_iter()
+                        .flat_map(|r| r.agents.values())
                         .filter_map(|a| a.cwd.as_deref())
                         .max_by_key(|cwd| cwd.len())
                         .map(String::from)

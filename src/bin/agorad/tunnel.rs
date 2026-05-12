@@ -1,3 +1,10 @@
+//! SSH reverse-forward tunnel lifecycle for remote agent hosts.
+//!
+//! Each registered remote has a tunnel thread that keeps an `ssh -N -R` alive
+//! and re-dials with exponential backoff on failure. State (status, last
+//! error, shutdown channel) lives in the corresponding `RemoteBackend` in
+//! `Inner.remotes`.
+
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
@@ -6,32 +13,32 @@ use agora::ipc::{self, RemoteStatus, RemoteSummary};
 use agora::model::RemoteHost;
 use agora::store;
 
+use crate::backend::RemoteBackend;
 use crate::State;
 
-#[derive(Debug, Clone)]
-pub(crate) struct TunnelState {
-    pub status: RemoteStatus,
-    pub last_error: Option<String>,
-    pub shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
-}
-
 pub(crate) fn start_tunnel(state: &State, host: RemoteHost) {
-    let prev = state.lock().unwrap().tunnels.remove(&host.host);
-    if let Some(t) = prev {
-        if let Some(tx) = t.shutdown_tx {
-            let _ = tx.send(());
+    // Stop any prior tunnel for this host.
+    {
+        let mut inner = state.lock().unwrap();
+        if let Some(remote) = inner.remotes.get_mut(&host.host) {
+            if let Some(tx) = remote.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
         }
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<()>();
-    state.lock().unwrap().tunnels.insert(
-        host.host.clone(),
-        TunnelState {
-            status: RemoteStatus::Connecting,
-            last_error: None,
-            shutdown_tx: Some(tx),
-        },
-    );
+    {
+        let mut inner = state.lock().unwrap();
+        let remote = inner
+            .remotes
+            .entry(host.host.clone())
+            .or_insert_with(|| RemoteBackend::new(host.clone()));
+        remote.config = host.clone();
+        remote.status = RemoteStatus::Connecting;
+        remote.last_error = None;
+        remote.shutdown_tx = Some(tx);
+    }
 
     let state = state.clone();
     let host_clone = host.clone();
@@ -106,7 +113,6 @@ fn tunnel_loop(state: State, host: RemoteHost, shutdown_rx: std::sync::mpsc::Rec
             })
         });
 
-        // Optimistic: assume connected after 1.5s of running ssh.
         std::thread::sleep(std::time::Duration::from_millis(1500));
         if child.try_wait().ok().flatten().is_none() {
             set_tunnel_status(&state, &host.host, RemoteStatus::Connected, None);
@@ -165,9 +171,9 @@ fn build_ssh_args(host: &RemoteHost, local_socket: &str) -> Vec<String> {
 
 fn set_tunnel_status(state: &State, host: &str, status: RemoteStatus, last_error: Option<String>) {
     let mut inner = state.lock().unwrap();
-    if let Some(t) = inner.tunnels.get_mut(host) {
-        t.status = status;
-        t.last_error = last_error;
+    if let Some(remote) = inner.remotes.get_mut(host) {
+        remote.status = status;
+        remote.last_error = last_error;
     }
 }
 
@@ -194,13 +200,16 @@ pub(crate) fn remote_add(
         auto_connect: true,
     };
     {
-        let mut inner = state.lock().unwrap();
-        if let Some(existing) = inner.remotes.iter_mut().find(|r| r.host == host_name) {
-            *existing = new_host.clone();
-        } else {
-            inner.remotes.push(new_host.clone());
-        }
-        store::save_remotes(&inner.remotes).context("save remotes store")?;
+        let inner = state.lock().unwrap();
+        let persisted: Vec<RemoteHost> = inner
+            .remotes
+            .values()
+            .filter(|r| !r.config.remote_socket.is_empty())
+            .map(|r| r.config.clone())
+            .filter(|r| r.host != host_name)
+            .chain(std::iter::once(new_host.clone()))
+            .collect();
+        store::save_remotes(&persisted).context("save remotes store")?;
     }
     start_tunnel(state, new_host.clone());
     Ok(remote_summary(state, &host_name))
@@ -209,14 +218,17 @@ pub(crate) fn remote_add(
 pub(crate) fn remote_remove(state: &State, host_name: String) -> Result<()> {
     let shutdown_tx = {
         let mut inner = state.lock().unwrap();
-        let idx = inner
+        let Some(mut remote) = inner.remotes.remove(&host_name) else {
+            bail!("no remote named '{host_name}'");
+        };
+        let persisted: Vec<RemoteHost> = inner
             .remotes
-            .iter()
-            .position(|r| r.host == host_name)
-            .ok_or_else(|| anyhow::anyhow!("no remote named '{host_name}'"))?;
-        inner.remotes.remove(idx);
-        store::save_remotes(&inner.remotes).context("save remotes store")?;
-        inner.tunnels.remove(&host_name).and_then(|t| t.shutdown_tx)
+            .values()
+            .filter(|r| !r.config.remote_socket.is_empty())
+            .map(|r| r.config.clone())
+            .collect();
+        store::save_remotes(&persisted).context("save remotes store")?;
+        remote.shutdown_tx.take()
     };
     if let Some(tx) = shutdown_tx {
         let _ = tx.send(());
@@ -228,43 +240,34 @@ pub(crate) fn remote_list(state: &State) -> Vec<RemoteSummary> {
     let inner = state.lock().unwrap();
     inner
         .remotes
-        .iter()
-        .map(|r| {
-            let (status, last_error) = inner
-                .tunnels
-                .get(&r.host)
-                .map(|t| (t.status, t.last_error.clone()))
-                .unwrap_or((RemoteStatus::Disconnected, None));
-            RemoteSummary {
-                host: r.clone(),
-                status,
-                last_error,
-            }
+        .values()
+        .filter(|r| !r.config.remote_socket.is_empty())
+        .map(|r| RemoteSummary {
+            host: r.config.clone(),
+            status: r.status,
+            last_error: r.last_error.clone(),
         })
         .collect()
 }
 
 fn remote_summary(state: &State, host_name: &str) -> RemoteSummary {
     let inner = state.lock().unwrap();
-    let host = inner
-        .remotes
-        .iter()
-        .find(|r| r.host == host_name)
-        .cloned()
-        .unwrap_or_else(|| RemoteHost {
-            host: host_name.to_string(),
-            remote_socket: String::new(),
-            remote_agora_path: None,
-            auto_connect: false,
-        });
-    let (status, last_error) = inner
-        .tunnels
-        .get(host_name)
-        .map(|t| (t.status, t.last_error.clone()))
-        .unwrap_or((RemoteStatus::Disconnected, None));
-    RemoteSummary {
-        host,
-        status,
-        last_error,
+    let remote = inner.remotes.get(host_name);
+    match remote {
+        Some(r) => RemoteSummary {
+            host: r.config.clone(),
+            status: r.status,
+            last_error: r.last_error.clone(),
+        },
+        None => RemoteSummary {
+            host: RemoteHost {
+                host: host_name.to_string(),
+                remote_socket: String::new(),
+                remote_agora_path: None,
+                auto_connect: false,
+            },
+            status: RemoteStatus::Disconnected,
+            last_error: None,
+        },
     }
 }

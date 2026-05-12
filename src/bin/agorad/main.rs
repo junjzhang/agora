@@ -4,10 +4,12 @@
 //! - Background thread: subscribes to niri events; tracks window→project claims.
 
 mod actions;
+mod agents;
+mod backend;
 mod config;
-mod hooks;
 mod launcher;
 mod niri;
+mod procutil;
 mod project;
 mod tunnel;
 
@@ -21,20 +23,18 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 
 use agora::ipc::{self, Payload, Request, Response};
-use agora::model::AgentSession;
 use agora::store;
 
+use backend::{LocalBackend, RemoteBackend};
 use config::{AgoraConfig, LauncherRegistry};
-use tunnel::TunnelState;
 
 #[derive(Default)]
 pub(crate) struct Inner {
     pub projects: Vec<agora::model::Project>,
     pub claims: HashMap<u64, Claim>,
     pub workspaces: HashMap<u64, WorkspaceInfo>,
-    pub agents: HashMap<String, AgentSession>,
-    pub remotes: Vec<agora::model::RemoteHost>,
-    pub tunnels: HashMap<String, TunnelState>,
+    pub local: LocalBackend,
+    pub remotes: HashMap<String, RemoteBackend>,
     pub launcher_registry: LauncherRegistry,
     pub config: AgoraConfig,
 }
@@ -87,13 +87,16 @@ fn main() -> Result<()> {
         cleanup_all_workspaces = cfg.cleanup_all_workspaces,
         "loaded agora config",
     );
+    let mut remote_backends: HashMap<String, RemoteBackend> = HashMap::new();
+    for r in &remotes {
+        remote_backends.insert(r.host.clone(), RemoteBackend::new(r.clone()));
+    }
     let state: State = Arc::new(Mutex::new(Inner {
         projects,
         claims: HashMap::new(),
         workspaces: HashMap::new(),
-        agents: HashMap::new(),
-        remotes: remotes.clone(),
-        tunnels: HashMap::new(),
+        local: LocalBackend::new(),
+        remotes: remote_backends,
         launcher_registry,
         config: cfg,
     }));
@@ -205,10 +208,10 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             event,
             payload,
         } => {
-            hooks::apply_hook(state, &cli, &event, &payload);
+            agents::apply_hook(state, &cli, &event, &payload);
             Ok(Payload::Ack)
         }
-        Request::Agents => Ok(Payload::Agents(hooks::agents(state))),
+        Request::Agents => Ok(Payload::Agents(agents::list(state))),
         Request::RemoteAdd { host, remote_uid } => Ok(Payload::Remote(tunnel::remote_add(
             state, host, remote_uid,
         )?)),
@@ -218,7 +221,7 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         }
         Request::RemoteList => Ok(Payload::Remotes(tunnel::remote_list(state))),
         Request::FocusAgent { session_id } => {
-            hooks::focus_agent(state, &session_id)?;
+            agents::focus(state, &session_id)?;
             Ok(Payload::Ack)
         }
         Request::Actions { target } => Ok(Payload::Actions(actions::actions_for_target(
@@ -234,7 +237,7 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
 
 fn picker_state(state: &State) -> Payload {
     let projects = state.lock().unwrap().projects.clone();
-    let agents = hooks::agents(state);
+    let agents = agents::list(state);
     let workspaces: Vec<agora::ipc::WorkspaceSummary> = state
         .lock()
         .unwrap()
