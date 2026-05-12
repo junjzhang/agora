@@ -204,7 +204,7 @@ pub(crate) fn remote_add(
         let persisted: Vec<RemoteHost> = inner
             .remotes
             .values()
-            .filter(|r| !r.config.remote_socket.is_empty())
+            .filter(|r| !r.is_ephemeral())
             .map(|r| r.config.clone())
             .filter(|r| r.host != host_name)
             .chain(std::iter::once(new_host.clone()))
@@ -218,13 +218,21 @@ pub(crate) fn remote_add(
 pub(crate) fn remote_remove(state: &State, host_name: String) -> Result<()> {
     let shutdown_tx = {
         let mut inner = state.lock().unwrap();
-        let Some(mut remote) = inner.remotes.remove(&host_name) else {
-            bail!("no remote named '{host_name}'");
-        };
+        // Refuse to remove an ephemeral remote (auto-created for a hook
+        // from an unregistered host). It's not user-managed and removing
+        // it would drop active in-memory sessions on that host.
+        match inner.remotes.get(&host_name) {
+            None => bail!("no remote named '{host_name}'"),
+            Some(r) if r.is_ephemeral() => {
+                bail!("'{host_name}' is not a configured remote; nothing to remove")
+            }
+            _ => {}
+        }
+        let mut remote = inner.remotes.remove(&host_name).unwrap();
         let persisted: Vec<RemoteHost> = inner
             .remotes
             .values()
-            .filter(|r| !r.config.remote_socket.is_empty())
+            .filter(|r| !r.is_ephemeral())
             .map(|r| r.config.clone())
             .collect();
         store::save_remotes(&persisted).context("save remotes store")?;
@@ -241,7 +249,7 @@ pub(crate) fn remote_list(state: &State) -> Vec<RemoteSummary> {
     inner
         .remotes
         .values()
-        .filter(|r| !r.config.remote_socket.is_empty())
+        .filter(|r| !r.is_ephemeral())
         .map(|r| RemoteSummary {
             host: r.config.clone(),
             status: r.status,
