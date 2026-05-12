@@ -7,10 +7,6 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
-use niri_ipc::{
-    Action as NiriAction, Request as NiriRequest, Response as NiriResponse, WorkspaceReferenceArg,
-};
 use serde_json::Value;
 
 use agora::ipc::RemoteStatus;
@@ -18,8 +14,7 @@ use agora::model::{AgentCli, AgentSession, RemoteHost};
 
 use crate::backend::ctx::EnrichCtx;
 use crate::backend::local::{apply_hook, match_cwd_to_project};
-use crate::backend::{AgentBackend, NotifyRequest};
-use crate::niri::niri_call;
+use crate::backend::{has_matching_agent, AgentBackend, FocusPlan, NotifyRequest};
 use crate::Claim;
 
 pub(crate) struct RemoteBackend {
@@ -40,6 +35,18 @@ impl RemoteBackend {
             agents: HashMap::new(),
         }
     }
+
+    /// Whether this backend is ephemeral — created on-the-fly because an
+    /// AGORA_HOST hook arrived for an unregistered host. Ephemeral entries
+    /// have no tunnel and aren't persisted; the dispatcher drops them once
+    /// their last session ends.
+    pub fn is_ephemeral(&self) -> bool {
+        self.config.remote_socket.is_empty()
+    }
+
+    fn host(&self) -> &str {
+        &self.config.host
+    }
 }
 
 impl AgentBackend for RemoteBackend {
@@ -53,64 +60,44 @@ impl AgentBackend for RemoteBackend {
     }
 
     fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {
-        let host = self.config.host.clone();
+        let host = self.host();
         self.agents
             .values()
-            .map(|a| enrich(a, &host, ctx))
+            .map(|a| enrich(a, host, ctx))
             .collect()
     }
 
-    fn prune(&mut self) {
-        // Remote PID liveness can't be checked from here without SSH'ing.
-        // Sessions are cleaned up by their SessionEnd hook, or stay until
-        // the next remote scan (TODO).
-    }
-
-    fn focus(&self, session_id: &str, ctx: &EnrichCtx) -> Result<bool> {
-        if !self.agents.contains_key(session_id) {
-            return Ok(false);
-        }
-        let agent = &self.agents[session_id];
-        let host = self.config.host.clone();
-        // Focus the workspace bound to the project that owns this cwd.
+    fn focus_plan(&self, session_id: &str, ctx: &EnrichCtx) -> anyhow::Result<Option<FocusPlan>> {
+        let Some(agent) = self.agents.get(session_id) else {
+            return Ok(None);
+        };
+        let host = self.host();
         let project_id = agent.project.clone().or_else(|| {
             agent
                 .cwd
                 .as_deref()
-                .and_then(|c| match_cwd_to_project(c, Some(&host), ctx.projects))
+                .and_then(|c| match_cwd_to_project(c, Some(host), ctx.projects))
         });
-        let ws_name = project_id.as_deref().and_then(|pid| {
+        let workspace = project_id.as_deref().and_then(|pid| {
             ctx.projects
                 .iter()
                 .find(|p| p.id == pid)
                 .map(|p| p.workspace_name.clone())
         });
-        if let Some(name) = ws_name {
-            let _ = niri_call(NiriRequest::Action(NiriAction::FocusWorkspace {
-                reference: WorkspaceReferenceArg::Name(name),
-            }));
-        }
-        let window_id = find_window_with_ssh_to(ctx.claims, &host);
-        if let Some(wid) = window_id {
-            match niri_call(NiriRequest::Action(NiriAction::FocusWindow { id: wid }))? {
-                NiriResponse::Handled => return Ok(true),
-                other => bail!("unexpected niri response: {other:?}"),
-            }
-        }
-        bail!("remote agent (host={host}); no workspace or terminal found")
+        let window = find_window_with_ssh_to(ctx.claims, host).ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote agent (host={host}); no kitty window with SSH to that host found"
+            )
+        })?;
+        Ok(Some(FocusPlan { workspace, window }))
     }
 
     fn has_agent(&self, project_id: &str, cli: Option<AgentCli>, ctx: &EnrichCtx) -> bool {
-        let host = self.config.host.clone();
-        self.agents.values().any(|a| {
-            if cli.is_some_and(|c| a.cli != c) {
-                return false;
-            }
-            let Some(cwd) = a.cwd.as_deref() else {
-                return false;
-            };
-            match_cwd_to_project(cwd, Some(&host), ctx.projects).as_deref() == Some(project_id)
-        })
+        has_matching_agent(&self.agents, project_id, cli, Some(self.host()), ctx.projects)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.agents.is_empty()
     }
 }
 

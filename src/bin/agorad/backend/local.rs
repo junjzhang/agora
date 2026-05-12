@@ -3,16 +3,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
-use niri_ipc::{Action as NiriAction, Request as NiriRequest, Response as NiriResponse};
 use serde_json::Value;
 
 use agora::model::{AgentCli, AgentPhase, AgentSession};
 
 use crate::backend::ctx::EnrichCtx;
-use crate::backend::{AgentBackend, NotifyRequest};
+use crate::backend::{has_matching_agent, AgentBackend, FocusPlan, NotifyRequest};
 use crate::launcher::truncate_str;
-use crate::niri::niri_call;
 use crate::Claim;
 
 #[derive(Default)]
@@ -24,23 +21,11 @@ impl LocalBackend {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl AgentBackend for LocalBackend {
-    fn apply_hook(
-        &mut self,
-        cli: AgentCli,
-        event: &str,
-        payload: &Value,
-    ) -> Option<NotifyRequest> {
-        apply_hook(&mut self.agents, cli, event, payload)
-    }
-
-    fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {
-        self.agents.values().map(|a| enrich(a, ctx)).collect()
-    }
-
-    fn prune(&mut self) {
+    /// Drop sessions whose PID no longer exists in /proc. Unique to the
+    /// local backend — remote PIDs live on the other host and can't be
+    /// checked from here.
+    pub fn prune(&mut self) {
         let dead: Vec<String> = self
             .agents
             .values()
@@ -59,36 +44,46 @@ impl AgentBackend for LocalBackend {
             }
         }
     }
+}
 
-    fn focus(&self, session_id: &str, ctx: &EnrichCtx) -> Result<bool> {
+impl AgentBackend for LocalBackend {
+    fn apply_hook(
+        &mut self,
+        cli: AgentCli,
+        event: &str,
+        payload: &Value,
+    ) -> Option<NotifyRequest> {
+        apply_hook(&mut self.agents, cli, event, payload)
+    }
+
+    fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {
+        self.agents.values().map(|a| enrich(a, ctx)).collect()
+    }
+
+    fn focus_plan(&self, session_id: &str, ctx: &EnrichCtx) -> anyhow::Result<Option<FocusPlan>> {
         let Some(agent) = self.agents.get(session_id) else {
-            return Ok(false);
+            return Ok(None);
         };
         let pid = agent.pid.ok_or_else(|| {
             anyhow::anyhow!("local agent '{session_id}' has no PID; hooks installed after start?")
         })?;
-        let wid = find_window_for_pid(ctx.claims, pid).ok_or_else(|| {
+        let window = find_window_for_pid(ctx.claims, pid).ok_or_else(|| {
             anyhow::anyhow!(
                 "no niri window found for local agent pid {pid} (session '{session_id}')"
             )
         })?;
-        let action = NiriAction::FocusWindow { id: wid };
-        match niri_call(NiriRequest::Action(action))? {
-            NiriResponse::Handled => Ok(true),
-            other => bail!("unexpected niri response to FocusWindow: {other:?}"),
-        }
+        Ok(Some(FocusPlan {
+            workspace: None,
+            window,
+        }))
     }
 
     fn has_agent(&self, project_id: &str, cli: Option<AgentCli>, ctx: &EnrichCtx) -> bool {
-        self.agents.values().any(|a| {
-            if cli.is_some_and(|c| a.cli != c) {
-                return false;
-            }
-            let Some(cwd) = a.cwd.as_deref() else {
-                return false;
-            };
-            match_cwd_to_project(cwd, None, ctx.projects).as_deref() == Some(project_id)
-        })
+        has_matching_agent(&self.agents, project_id, cli, None, ctx.projects)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.agents.is_empty()
     }
 }
 

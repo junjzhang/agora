@@ -17,7 +17,9 @@ pub(crate) use ctx::EnrichCtx;
 pub(crate) use local::LocalBackend;
 pub(crate) use remote::RemoteBackend;
 
-use agora::model::{AgentCli, AgentSession};
+use std::collections::HashMap;
+
+use agora::model::{AgentCli, AgentSession, Project};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -28,6 +30,17 @@ pub(crate) struct NotifyRequest {
     pub title: String,
     pub body: String,
     pub session_id: String,
+}
+
+/// What the daemon should do with niri to focus an agent. Decided under the
+/// state lock; executed outside the lock so a slow niri IPC doesn't stall
+/// the rest of the daemon.
+#[derive(Debug)]
+pub(crate) struct FocusPlan {
+    /// Optional workspace name to focus before focusing the window.
+    pub workspace: Option<String>,
+    /// Window id to focus.
+    pub window: u64,
 }
 
 pub(crate) trait AgentBackend {
@@ -44,15 +57,37 @@ pub(crate) trait AgentBackend {
     /// metadata derived from the provided context.
     fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession>;
 
-    /// Drop sessions that no longer exist (force-killed, crashed, etc).
-    fn prune(&mut self);
-
-    /// Focus the niri window for `session_id` if this backend owns it.
-    /// Ok(true) = focused; Ok(false) = not owned; Err = backend owns it but
-    /// focusing failed (e.g. window gone).
-    fn focus(&self, session_id: &str, ctx: &EnrichCtx) -> Result<bool>;
+    /// Build a focus plan for `session_id` if this backend owns it.
+    /// Ok(Some(plan)) = owned, here's what to do.
+    /// Ok(None) = not owned by this backend; try another.
+    /// Err = owned but cannot resolve a target (no window, no PID, etc).
+    fn focus_plan(&self, session_id: &str, ctx: &EnrichCtx) -> Result<Option<FocusPlan>>;
 
     /// True if this backend tracks any session matching `project_id`
     /// (optionally filtered by CLI).
     fn has_agent(&self, project_id: &str, cli: Option<AgentCli>, ctx: &EnrichCtx) -> bool;
+
+    /// True iff this backend's agent map is empty. Lets the dispatcher
+    /// drop ephemeral remotes whose last session just ended.
+    fn is_empty(&self) -> bool;
+}
+
+/// Filter shared by both backends: does the agent map contain a session
+/// whose cwd lives under one of `project_id`'s roots matching `host`?
+pub(crate) fn has_matching_agent(
+    agents: &HashMap<String, AgentSession>,
+    project_id: &str,
+    cli: Option<AgentCli>,
+    host: Option<&str>,
+    projects: &[Project],
+) -> bool {
+    agents.values().any(|a| {
+        if cli.is_some_and(|c| a.cli != c) {
+            return false;
+        }
+        let Some(cwd) = a.cwd.as_deref() else {
+            return false;
+        };
+        local::match_cwd_to_project(cwd, host, projects).as_deref() == Some(project_id)
+    })
 }

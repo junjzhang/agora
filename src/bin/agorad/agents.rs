@@ -5,11 +5,15 @@
 //! decides which backend a request belongs to.
 
 use anyhow::{bail, Result};
+use niri_ipc::{
+    Action as NiriAction, Request as NiriRequest, Response as NiriResponse, WorkspaceReferenceArg,
+};
 
 use agora::model::{AgentCli, AgentSession, RemoteHost};
 
 use crate::backend::ctx::EnrichCtx;
-use crate::backend::{AgentBackend, NotifyRequest, RemoteBackend};
+use crate::backend::{AgentBackend, FocusPlan, NotifyRequest, RemoteBackend};
+use crate::niri::niri_call;
 use crate::{Inner, State};
 
 pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_json::Value) {
@@ -38,17 +42,23 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
         let notify = if is_local {
             inner.local.apply_hook(cli_kind, event, payload)
         } else {
-            let host = agora_host.clone().unwrap();
-            let remote = inner.remotes.entry(host.clone()).or_insert_with(|| {
+            let host = agora_host.as_deref().unwrap();
+            let remote = inner.remotes.entry(host.to_string()).or_insert_with(|| {
                 tracing::info!(%host, "tracking ephemeral remote backend (not in remotes store)");
                 RemoteBackend::new(RemoteHost {
-                    host: host.clone(),
+                    host: host.to_string(),
                     remote_socket: String::new(),
                     remote_agora_path: None,
                     auto_connect: false,
                 })
             });
-            remote.apply_hook(cli_kind, event, payload)
+            let n = remote.apply_hook(cli_kind, event, payload);
+            // Drop ephemeral remotes whose last session just ended.
+            if remote.is_ephemeral() && remote.is_empty() {
+                inner.remotes.remove(host);
+                tracing::info!(%host, "dropped empty ephemeral remote backend");
+            }
+            n
         };
         (notify, inner.config.notify)
     };
@@ -67,9 +77,6 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
 pub(crate) fn list(state: &State) -> Vec<AgentSession> {
     let mut inner = state.lock().unwrap();
     inner.local.prune();
-    for remote in inner.remotes.values_mut() {
-        remote.prune();
-    }
     let ctx = EnrichCtx {
         projects: &inner.projects,
         claims: &inner.claims,
@@ -88,21 +95,44 @@ pub(crate) fn list(state: &State) -> Vec<AgentSession> {
 }
 
 pub(crate) fn focus(state: &State, session_id: &str) -> Result<()> {
-    let inner = state.lock().unwrap();
-    let ctx = EnrichCtx {
-        projects: &inner.projects,
-        claims: &inner.claims,
-        workspaces: &inner.workspaces,
+    // Decide what to focus under the lock, then release before any niri
+    // IPC. A slow niri call must not stall hook delivery or picker reads.
+    let plan: Option<FocusPlan> = {
+        let inner = state.lock().unwrap();
+        let ctx = EnrichCtx {
+            projects: &inner.projects,
+            claims: &inner.claims,
+            workspaces: &inner.workspaces,
+        };
+        if let Some(p) = inner.local.focus_plan(session_id, &ctx)? {
+            Some(p)
+        } else {
+            let mut found: Option<FocusPlan> = None;
+            for remote in inner.remotes.values() {
+                if let Some(p) = remote.focus_plan(session_id, &ctx)? {
+                    found = Some(p);
+                    break;
+                }
+            }
+            found
+        }
     };
-    if inner.local.focus(session_id, &ctx)? {
-        return Ok(());
-    }
-    for remote in inner.remotes.values() {
-        if remote.focus(session_id, &ctx)? {
-            return Ok(());
+
+    let Some(plan) = plan else {
+        bail!("no agent session '{session_id}' found");
+    };
+
+    if let Some(ws_name) = plan.workspace {
+        if let Err(e) = niri_call(NiriRequest::Action(NiriAction::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Name(ws_name.clone()),
+        })) {
+            tracing::warn!(workspace = %ws_name, error = %e, "FocusWorkspace failed");
         }
     }
-    bail!("no agent session '{session_id}' found");
+    match niri_call(NiriRequest::Action(NiriAction::FocusWindow { id: plan.window }))? {
+        NiriResponse::Handled => Ok(()),
+        other => bail!("unexpected niri response to FocusWindow: {other:?}"),
+    }
 }
 
 /// Caller holds the lock on `Inner`. Avoids re-locking from inside callers
