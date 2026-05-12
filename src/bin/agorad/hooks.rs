@@ -14,6 +14,7 @@ use crate::niri::niri_call;
 use crate::{Claim, Inner, State};
 
 pub(crate) fn agents(state: &State) -> Vec<AgentSession> {
+    prune_dead_local(state);
     let inner = state.lock().unwrap();
     let local_host = read_local_hostname();
     let mut out: Vec<AgentSession> = inner
@@ -61,6 +62,40 @@ pub(crate) fn apply_hook(state: &State, cli_str: &str, event: &str, payload: &se
     apply_hook_inner(state, cli_str, event, payload);
     if let Err(e) = write_agents_cache(state) {
         tracing::warn!(error = %e, "agents cache write failed");
+    }
+}
+
+/// Remove local agent sessions whose PID is no longer alive.
+///
+/// Catches sessions that exited without firing SessionEnd (force-kill, crash,
+/// or a CLI that simply doesn't emit the event on all exit paths). Remote
+/// sessions are skipped — their PID is on the other host.
+fn prune_dead_local(state: &State) {
+    let local_host = read_local_hostname();
+    let mut inner = state.lock().unwrap();
+    let dead: Vec<String> = inner
+        .agents
+        .values()
+        .filter_map(|a| {
+            let is_local = match a.host.as_deref() {
+                None => true,
+                Some(h) => Some(h) == local_host.as_deref(),
+            };
+            if !is_local {
+                return None;
+            }
+            let pid = a.pid?;
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                None
+            } else {
+                Some(a.session_id.clone())
+            }
+        })
+        .collect();
+    for sid in dead {
+        if inner.agents.remove(&sid).is_some() {
+            tracing::info!(session = %sid, "pruned dead local session");
+        }
     }
 }
 
