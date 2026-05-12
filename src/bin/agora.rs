@@ -743,7 +743,7 @@ fn hook_settings_path(cli: &str) -> Result<std::path::PathBuf> {
     let base = std::path::PathBuf::from(home);
     match cli {
         "claude" => Ok(base.join(".claude").join("settings.local.json")),
-        "codex" => Ok(base.join(".codex").join("settings.local.json")),
+        "codex" => Ok(base.join(".codex").join("hooks.json")),
         other => anyhow::bail!("unknown cli '{other}' (expected claude|codex)"),
     }
 }
@@ -769,11 +769,13 @@ fn hook_events_for(cli: &str) -> &'static [(&'static str, bool)] {
         ],
         "codex" => &[
             ("SessionStart", false),
+            ("SessionEnd", false),
             ("UserPromptSubmit", false),
             ("PreToolUse", true),
             ("PostToolUse", true),
-            ("PermissionRequest", true),
+            ("Notification", true),
             ("Stop", false),
+            ("SubagentStop", false),
         ],
         _ => &[],
     }
@@ -810,11 +812,15 @@ fn hook_install(cli: &str, host_alias: Option<&str>) -> Result<()> {
     }
     let hooks = hooks.as_object_mut().unwrap();
 
+    let agora_bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "agora".to_string());
     let prefix = match host_alias {
         Some(alias) => format!("AGORA_HOST={alias} "),
         None => String::new(),
     };
-    let cmd = format!("{prefix}agora hook event --cli {cli} {{event}}"); // placeholder; replaced per-event
+    let cmd = format!("{prefix}{agora_bin} hook event --cli {cli} {{event}}"); // placeholder; replaced per-event
     let events = hook_events_for(cli);
     if events.is_empty() {
         anyhow::bail!("no hooks defined for cli '{cli}' yet");
