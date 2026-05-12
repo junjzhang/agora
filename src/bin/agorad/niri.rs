@@ -184,7 +184,18 @@ pub(crate) fn status(state: &State) -> Payload {
         })
         .collect();
     windows.sort_by_key(|w| (w.workspace_id, w.column, w.window_id));
-    let mut agents: Vec<AgentSession> = inner.agents.values().cloned().collect();
+    let mut agents: Vec<AgentSession> = inner
+        .local
+        .agents
+        .values()
+        .cloned()
+        .chain(
+            inner
+                .remotes
+                .values()
+                .flat_map(|r| r.agents.values().cloned()),
+        )
+        .collect();
     agents.sort_by_key(|a| std::cmp::Reverse(a.last_change));
     Payload::Status {
         project_count: inner.projects.len(),

@@ -3,9 +3,9 @@ use anyhow::{bail, Context, Result};
 use agora::ipc::{ActionSummary, ActionTarget};
 use agora::model::AgentCli;
 
-use crate::hooks::project_has_agent;
+use crate::agents::project_has_agent;
 use crate::launcher::{
-    launcher_available_for_root, launcher_argv_with_args, niri_spawn, shell_quote,
+    launcher_argv_with_args, launcher_available_for_root, niri_spawn, shell_quote,
 };
 use crate::project::{attach, forget, open};
 use crate::State;
@@ -185,11 +185,7 @@ fn run_project_action(state: &State, project_id: &str, action_id: &str) -> Resul
         }
         "builtin:edit" => {
             let cmd = format!("agora edit {}; exec zsh", shell_quote(project_id));
-            return niri_spawn(
-                vec!["zsh".into(), "-ic".into(), cmd],
-                "builtin:edit",
-                root,
-            );
+            return niri_spawn(vec!["zsh".into(), "-ic".into(), cmd], "builtin:edit", root);
         }
         "builtin:rename" => {
             let cmd = format!(

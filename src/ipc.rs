@@ -27,25 +27,60 @@ pub struct ActionSummary {
 }
 
 pub fn socket_path() -> Result<PathBuf> {
+    runtime_path("agora.sock")
+}
+
+/// Watcher socket — used by the liveness subsystem to receive "watch this
+/// PID" notifications from hook scripts on the same host. Distinct from
+/// `socket_path()` because that one can be SSH-tunneled to a different
+/// host's daemon; watcher commands always stay local.
+pub fn watcher_socket_path() -> Result<PathBuf> {
+    runtime_path("agora-watcher.sock")
+}
+
+fn runtime_path(name: &str) -> Result<PathBuf> {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !d.is_empty() {
-            return Ok(PathBuf::from(d).join("agora.sock"));
+            return Ok(PathBuf::from(d).join(name));
         }
     }
-    // Fallback when XDG_RUNTIME_DIR isn't set — common in ssh non-login
-    // shells. systemd-logind still creates /run/user/$UID on most systems.
     let uid = unsafe { libc::getuid() };
-    let path = PathBuf::from(format!("/run/user/{uid}/agora.sock"));
+    let path = PathBuf::from(format!("/run/user/{uid}/{name}"));
     let parent_exists = path.parent().map(|p| p.exists()).unwrap_or(false);
     if parent_exists {
         return Ok(path);
     }
     anyhow::bail!(
-        "could not locate agora socket: XDG_RUNTIME_DIR unset and {} missing",
+        "could not locate {name}: XDG_RUNTIME_DIR unset and {} missing",
         path.parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default()
     );
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WatcherRequest {
+    /// Begin watching `pid`. When it exits, the watcher posts a synthetic
+    /// SessionEnd hook event to the daemon (or, in full mode, drops the
+    /// agent directly).
+    Watch {
+        session_id: String,
+        pid: i32,
+        cli: String,
+        /// `agora_host` to include in the synthesized SessionEnd payload so
+        /// the daemon routes the event to the right backend.
+        #[serde(default)]
+        host: Option<String>,
+    },
+    /// Stop watching. Redundant with PID exit but useful for explicit
+    /// cleanup (e.g. when a real SessionEnd already fired).
+    Forget { session_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WatcherResponse {
+    Ok,
+    Err(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +226,14 @@ pub struct WorkspaceSummary {
     pub name: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
+    /// niri's per-output 1-based index. Picker shows this when the workspace
+    /// has no name.
+    #[serde(default)]
+    pub idx: u8,
+    /// Number of windows the daemon currently tracks on this workspace.
+    /// Picker uses this to hide empty workspaces.
+    #[serde(default)]
+    pub window_count: u32,
 }
 
 /// One remote, with both stored config and live tunnel status.

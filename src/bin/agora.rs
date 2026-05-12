@@ -641,6 +641,11 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
             }
         }
     }
+    // Notify the local watcher (same host as this hook fired on) so its
+    // liveness loop can pidfd-watch our PID. Fire-and-forget — the watcher
+    // may not be running (e.g. fresh remote without agorad).
+    notify_watcher(event, cli, &payload);
+
     // Fire-and-forget: send and don't fail the hook on daemon error.
     // Hook scripts must exit cleanly so the agent CLI keeps moving.
     if let Err(e) = call(Request::Hook {
@@ -651,6 +656,52 @@ fn hook_event(event: &str, cli: &str) -> Result<()> {
         eprintln!("agora hook: {e:#}");
     }
     Ok(())
+}
+
+fn notify_watcher(event: &str, cli: &str, payload: &serde_json::Value) {
+    use agora::ipc::WatcherRequest;
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let host = payload
+        .get("agora_host")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let req = match event {
+        "SessionStart" => {
+            let pid = payload
+                .get("agora_pid")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok());
+            let Some(pid) = pid else { return };
+            WatcherRequest::Watch {
+                session_id,
+                pid,
+                cli: cli.to_string(),
+                host,
+            }
+        }
+        "SessionEnd" => WatcherRequest::Forget { session_id },
+        _ => return,
+    };
+    let Ok(path) = ipc::watcher_socket_path() else {
+        return;
+    };
+    let Ok(stream) = UnixStream::connect(&path) else {
+        return;
+    };
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut writer = stream;
+    let _ = ipc::write_line(&mut writer, &req);
+    // Drain response so the server doesn't see RST.
+    let _: Result<agora::ipc::WatcherResponse> = ipc::read_line(&mut reader);
 }
 
 /// Find the session slug by scanning `~/.claude/projects/` for a JSONL file

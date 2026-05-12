@@ -4,12 +4,16 @@
 //! - Background thread: subscribes to niri events; tracks window→project claims.
 
 mod actions;
+mod agents;
+mod backend;
 mod config;
-mod hooks;
 mod launcher;
+mod liveness;
 mod niri;
+mod procutil;
 mod project;
 mod tunnel;
+mod watcher_sock;
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,22 +25,22 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 
 use agora::ipc::{self, Payload, Request, Response};
-use agora::model::AgentSession;
 use agora::store;
 
+use backend::{LocalBackend, RemoteBackend};
 use config::{AgoraConfig, LauncherRegistry};
-use tunnel::TunnelState;
+use liveness::Liveness;
 
 #[derive(Default)]
 pub(crate) struct Inner {
     pub projects: Vec<agora::model::Project>,
     pub claims: HashMap<u64, Claim>,
     pub workspaces: HashMap<u64, WorkspaceInfo>,
-    pub agents: HashMap<String, AgentSession>,
-    pub remotes: Vec<agora::model::RemoteHost>,
-    pub tunnels: HashMap<String, TunnelState>,
+    pub local: LocalBackend,
+    pub remotes: HashMap<String, RemoteBackend>,
     pub launcher_registry: LauncherRegistry,
     pub config: AgoraConfig,
+    pub liveness: Option<Liveness>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,11 @@ fn main() -> Result<()> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--watcher-only") {
+        return main_watcher_only();
+    }
+
     tracing::info!("agorad v{} starting", env!("CARGO_PKG_VERSION"));
 
     let projects = store::load().context("load project store")?;
@@ -87,21 +96,39 @@ fn main() -> Result<()> {
         cleanup_all_workspaces = cfg.cleanup_all_workspaces,
         "loaded agora config",
     );
+    let mut remote_backends: HashMap<String, RemoteBackend> = HashMap::new();
+    for r in &remotes {
+        remote_backends.insert(r.host.clone(), RemoteBackend::new(r.clone()));
+    }
+    let (liveness, exit_rx) = liveness::spawn();
+    tracing::info!("liveness watcher started");
     let state: State = Arc::new(Mutex::new(Inner {
         projects,
         claims: HashMap::new(),
         workspaces: HashMap::new(),
-        agents: HashMap::new(),
-        remotes: remotes.clone(),
-        tunnels: HashMap::new(),
+        local: LocalBackend::new(),
+        remotes: remote_backends,
         launcher_registry,
         config: cfg,
+        liveness: Some(liveness),
     }));
 
     for r in &remotes {
         if r.auto_connect {
             tunnel::start_tunnel(&state, r.clone());
         }
+    }
+
+    {
+        let state = state.clone();
+        std::thread::Builder::new()
+            .name("liveness-exit".into())
+            .spawn(move || {
+                while let Ok(session_id) = exit_rx.recv() {
+                    agents::on_local_session_exit(&state, &session_id);
+                }
+            })
+            .context("spawn liveness-exit thread")?;
     }
 
     {
@@ -116,11 +143,102 @@ fn main() -> Result<()> {
             .context("spawn niri-events thread")?;
     }
 
+    {
+        let liveness = state.lock().unwrap().liveness.clone();
+        let watches = Arc::new(Mutex::new(
+            HashMap::<String, watcher_sock::WatchEntry>::new(),
+        ));
+        let watcher_path = ipc::watcher_socket_path()?;
+        let listener = watcher_sock::bind_socket(&watcher_path)?;
+        tracing::info!(path = %watcher_path.display(), "watcher socket listening");
+        if let Some(liveness) = liveness {
+            std::thread::Builder::new()
+                .name("watcher-sock".into())
+                .spawn(move || watcher_sock::serve(listener, liveness, watches))
+                .context("spawn watcher-sock thread")?;
+        }
+    }
+
     let path = ipc::socket_path()?;
     let listener = bind_socket(&path)?;
     tracing::info!(path = %path.display(), "socket listening");
 
     serve_socket(listener, state)
+}
+
+/// Slim daemon mode used on remote hosts: just liveness + watcher socket.
+/// No project store, no niri loop, no daemon socket — just listens for
+/// "watch this PID" commands and, on PID exit, shells out to
+/// `agora hook event SessionEnd` (which reaches the central daemon via the
+/// SSH reverse-forward tunnel).
+fn main_watcher_only() -> Result<()> {
+    tracing::info!(
+        "agorad v{} starting (watcher-only)",
+        env!("CARGO_PKG_VERSION")
+    );
+    let (liveness, exit_rx) = liveness::spawn();
+    let watches: Arc<Mutex<HashMap<String, watcher_sock::WatchEntry>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let watcher_path = ipc::watcher_socket_path()?;
+    let listener = watcher_sock::bind_socket(&watcher_path)?;
+    tracing::info!(path = %watcher_path.display(), "watcher socket listening");
+
+    {
+        let watches = watches.clone();
+        std::thread::Builder::new()
+            .name("liveness-exit".into())
+            .spawn(move || {
+                while let Ok(session_id) = exit_rx.recv() {
+                    let entry = watches.lock().unwrap().remove(&session_id);
+                    let Some(entry) = entry else {
+                        continue;
+                    };
+                    tracing::info!(session = %session_id, cli = %entry.cli, "pidfd exit; firing SessionEnd");
+                    fire_remote_session_end(&session_id, &entry.cli, entry.host.as_deref());
+                }
+            })
+            .context("spawn liveness-exit thread")?;
+    }
+
+    watcher_sock::serve(listener, liveness, watches);
+    Ok(())
+}
+
+/// Shell out to `agora hook event --cli X SessionEnd` to deliver a
+/// synthetic SessionEnd. Used by watcher-only mode where we have no
+/// in-process state.
+fn fire_remote_session_end(session_id: &str, cli: &str, host: Option<&str>) {
+    let payload = serde_json::json!({ "session_id": session_id });
+    // Sibling `agora` next to this binary. The watcher-only mode typically
+    // runs without an interactive shell environment, so $PATH may not include
+    // the install dir.
+    let agora_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("agora")))
+        .unwrap_or_else(|| std::path::PathBuf::from("agora"));
+    let mut cmd = std::process::Command::new(&agora_bin);
+    cmd.args(["hook", "event", "--cli", cli, "SessionEnd"]);
+    if let Some(h) = host {
+        cmd.env("AGORA_HOST", h);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    match cmd.spawn() {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write;
+                let mut stdin = stdin;
+                let _ = stdin.write_all(payload.to_string().as_bytes());
+            }
+            // Wait briefly so we know the child started successfully.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "spawn `agora hook event SessionEnd` failed"),
+    }
 }
 
 fn bind_socket(path: &Path) -> Result<UnixListener> {
@@ -205,10 +323,10 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             event,
             payload,
         } => {
-            hooks::apply_hook(state, &cli, &event, &payload);
+            agents::apply_hook(state, &cli, &event, &payload);
             Ok(Payload::Ack)
         }
-        Request::Agents => Ok(Payload::Agents(hooks::agents(state))),
+        Request::Agents => Ok(Payload::Agents(agents::list(state))),
         Request::RemoteAdd { host, remote_uid } => Ok(Payload::Remote(tunnel::remote_add(
             state, host, remote_uid,
         )?)),
@@ -218,7 +336,7 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
         }
         Request::RemoteList => Ok(Payload::Remotes(tunnel::remote_list(state))),
         Request::FocusAgent { session_id } => {
-            hooks::focus_agent(state, &session_id)?;
+            agents::focus(state, &session_id)?;
             Ok(Payload::Ack)
         }
         Request::Actions { target } => Ok(Payload::Actions(actions::actions_for_target(
@@ -234,10 +352,15 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
 
 fn picker_state(state: &State) -> Payload {
     let projects = state.lock().unwrap().projects.clone();
-    let agents = hooks::agents(state);
-    let workspaces: Vec<agora::ipc::WorkspaceSummary> = state
-        .lock()
-        .unwrap()
+    let agents = agents::list(state);
+    let inner = state.lock().unwrap();
+    let mut counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+    for c in inner.claims.values() {
+        if let Some(ws_id) = c.workspace_id {
+            *counts.entry(ws_id).or_insert(0) += 1;
+        }
+    }
+    let workspaces: Vec<agora::ipc::WorkspaceSummary> = inner
         .workspaces
         .iter()
         .map(|(&id, w)| agora::ipc::WorkspaceSummary {
@@ -245,8 +368,11 @@ fn picker_state(state: &State) -> Payload {
             name: w.name.clone(),
             is_active: w.is_active,
             is_focused: w.is_focused,
+            idx: w.idx,
+            window_count: counts.get(&id).copied().unwrap_or(0),
         })
         .collect();
+    drop(inner);
     Payload::PickerState {
         projects,
         agents,
