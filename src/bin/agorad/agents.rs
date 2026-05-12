@@ -37,7 +37,7 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
         _ => false,
     };
 
-    let (notify, notify_enabled) = {
+    let (notify, notify_enabled, liveness_action) = {
         let mut inner = state.lock().unwrap();
         let notify = if is_local {
             inner.local.apply_hook(cli_kind, event, payload)
@@ -53,15 +53,30 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
                 })
             });
             let n = remote.apply_hook(cli_kind, event, payload);
-            // Drop ephemeral remotes whose last session just ended.
             if remote.is_ephemeral() && remote.is_empty() {
                 inner.remotes.remove(host);
                 tracing::info!(%host, "dropped empty ephemeral remote backend");
             }
             n
         };
-        (notify, inner.config.notify)
+        // Liveness watch is local-only — remote PIDs are on a different host.
+        let liveness_action = if is_local {
+            liveness_action_for(&inner, event, payload)
+        } else {
+            None
+        };
+        (notify, inner.config.notify, liveness_action)
     };
+
+    if let (Some(liveness), Some(action)) = (
+        state.lock().unwrap().liveness.clone(),
+        liveness_action,
+    ) {
+        match action {
+            LivenessAction::Watch { session_id, pid } => liveness.watch(session_id, pid),
+            LivenessAction::Forget { session_id } => liveness.forget(session_id),
+        }
+    }
 
     if notify_enabled {
         if let Some(req) = notify {
@@ -132,6 +147,52 @@ pub(crate) fn focus(state: &State, session_id: &str) -> Result<()> {
     match niri_call(NiriRequest::Action(NiriAction::FocusWindow { id: plan.window }))? {
         NiriResponse::Handled => Ok(()),
         other => bail!("unexpected niri response to FocusWindow: {other:?}"),
+    }
+}
+
+/// Synthesize a SessionEnd for a local session whose PID just exited.
+/// Called by the liveness-exit thread. Uses the same dispatch path as a
+/// real SessionEnd hook would, so the agent is dropped and the cache is
+/// rewritten consistently.
+pub(crate) fn on_local_session_exit(state: &State, session_id: &str) {
+    // Skip if the session is already gone (e.g. real SessionEnd already
+    // ran before the pidfd reactor woke up).
+    {
+        let inner = state.lock().unwrap();
+        if !inner.local.agents.contains_key(session_id) {
+            return;
+        }
+    }
+    tracing::info!(session = %session_id, "pidfd reported exit; synthesizing SessionEnd");
+    let payload = serde_json::json!({ "session_id": session_id });
+    // We don't know the original cli kind here without looking it up, but
+    // SessionEnd handling doesn't care — it removes by session_id.
+    apply_hook(state, "claude", "SessionEnd", &payload);
+}
+
+#[derive(Debug)]
+enum LivenessAction {
+    Watch { session_id: String, pid: i32 },
+    Forget { session_id: String },
+}
+
+/// Decide whether this hook event should add/remove a pidfd watch.
+fn liveness_action_for(
+    _inner: &Inner,
+    event: &str,
+    payload: &serde_json::Value,
+) -> Option<LivenessAction> {
+    let session_id = payload.get("session_id").and_then(|v| v.as_str())?.to_string();
+    match event {
+        "SessionStart" => {
+            let pid = payload
+                .get("agora_pid")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())?;
+            Some(LivenessAction::Watch { session_id, pid })
+        }
+        "SessionEnd" => Some(LivenessAction::Forget { session_id }),
+        _ => None,
     }
 }
 

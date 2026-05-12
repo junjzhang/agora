@@ -8,10 +8,12 @@ mod agents;
 mod backend;
 mod config;
 mod launcher;
+mod liveness;
 mod niri;
 mod procutil;
 mod project;
 mod tunnel;
+mod watcher_sock;
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +29,7 @@ use agora::store;
 
 use backend::{LocalBackend, RemoteBackend};
 use config::{AgoraConfig, LauncherRegistry};
+use liveness::Liveness;
 
 #[derive(Default)]
 pub(crate) struct Inner {
@@ -37,6 +40,7 @@ pub(crate) struct Inner {
     pub remotes: HashMap<String, RemoteBackend>,
     pub launcher_registry: LauncherRegistry,
     pub config: AgoraConfig,
+    pub liveness: Option<Liveness>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,11 @@ fn main() -> Result<()> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--watcher-only") {
+        return main_watcher_only();
+    }
+
     tracing::info!("agorad v{} starting", env!("CARGO_PKG_VERSION"));
 
     let projects = store::load().context("load project store")?;
@@ -91,6 +100,8 @@ fn main() -> Result<()> {
     for r in &remotes {
         remote_backends.insert(r.host.clone(), RemoteBackend::new(r.clone()));
     }
+    let (liveness, exit_rx) = liveness::spawn();
+    tracing::info!("liveness watcher started");
     let state: State = Arc::new(Mutex::new(Inner {
         projects,
         claims: HashMap::new(),
@@ -99,12 +110,25 @@ fn main() -> Result<()> {
         remotes: remote_backends,
         launcher_registry,
         config: cfg,
+        liveness: Some(liveness),
     }));
 
     for r in &remotes {
         if r.auto_connect {
             tunnel::start_tunnel(&state, r.clone());
         }
+    }
+
+    {
+        let state = state.clone();
+        std::thread::Builder::new()
+            .name("liveness-exit".into())
+            .spawn(move || {
+                while let Ok(session_id) = exit_rx.recv() {
+                    agents::on_local_session_exit(&state, &session_id);
+                }
+            })
+            .context("spawn liveness-exit thread")?;
     }
 
     {
@@ -119,11 +143,97 @@ fn main() -> Result<()> {
             .context("spawn niri-events thread")?;
     }
 
+    {
+        let liveness = state.lock().unwrap().liveness.clone();
+        let watches = Arc::new(Mutex::new(HashMap::<String, watcher_sock::WatchEntry>::new()));
+        let watcher_path = ipc::watcher_socket_path()?;
+        let listener = watcher_sock::bind_socket(&watcher_path)?;
+        tracing::info!(path = %watcher_path.display(), "watcher socket listening");
+        if let Some(liveness) = liveness {
+            std::thread::Builder::new()
+                .name("watcher-sock".into())
+                .spawn(move || watcher_sock::serve(listener, liveness, watches))
+                .context("spawn watcher-sock thread")?;
+        }
+    }
+
     let path = ipc::socket_path()?;
     let listener = bind_socket(&path)?;
     tracing::info!(path = %path.display(), "socket listening");
 
     serve_socket(listener, state)
+}
+
+/// Slim daemon mode used on remote hosts: just liveness + watcher socket.
+/// No project store, no niri loop, no daemon socket — just listens for
+/// "watch this PID" commands and, on PID exit, shells out to
+/// `agora hook event SessionEnd` (which reaches the central daemon via the
+/// SSH reverse-forward tunnel).
+fn main_watcher_only() -> Result<()> {
+    tracing::info!("agorad v{} starting (watcher-only)", env!("CARGO_PKG_VERSION"));
+    let (liveness, exit_rx) = liveness::spawn();
+    let watches: Arc<Mutex<HashMap<String, watcher_sock::WatchEntry>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let watcher_path = ipc::watcher_socket_path()?;
+    let listener = watcher_sock::bind_socket(&watcher_path)?;
+    tracing::info!(path = %watcher_path.display(), "watcher socket listening");
+
+    {
+        let watches = watches.clone();
+        std::thread::Builder::new()
+            .name("liveness-exit".into())
+            .spawn(move || {
+                while let Ok(session_id) = exit_rx.recv() {
+                    let entry = watches.lock().unwrap().remove(&session_id);
+                    let Some(entry) = entry else {
+                        continue;
+                    };
+                    tracing::info!(session = %session_id, cli = %entry.cli, "pidfd exit; firing SessionEnd");
+                    fire_remote_session_end(&session_id, &entry.cli, entry.host.as_deref());
+                }
+            })
+            .context("spawn liveness-exit thread")?;
+    }
+
+    watcher_sock::serve(listener, liveness, watches);
+    Ok(())
+}
+
+/// Shell out to `agora hook event --cli X SessionEnd` to deliver a
+/// synthetic SessionEnd. Used by watcher-only mode where we have no
+/// in-process state.
+fn fire_remote_session_end(session_id: &str, cli: &str, host: Option<&str>) {
+    let payload = serde_json::json!({ "session_id": session_id });
+    // Sibling `agora` next to this binary. The watcher-only mode typically
+    // runs without an interactive shell environment, so $PATH may not include
+    // the install dir.
+    let agora_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("agora")))
+        .unwrap_or_else(|| std::path::PathBuf::from("agora"));
+    let mut cmd = std::process::Command::new(&agora_bin);
+    cmd.args(["hook", "event", "--cli", cli, "SessionEnd"]);
+    if let Some(h) = host {
+        cmd.env("AGORA_HOST", h);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    match cmd.spawn() {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write;
+                let mut stdin = stdin;
+                let _ = stdin.write_all(payload.to_string().as_bytes());
+            }
+            // Wait briefly so we know the child started successfully.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "spawn `agora hook event SessionEnd` failed"),
+    }
 }
 
 fn bind_socket(path: &Path) -> Result<UnixListener> {

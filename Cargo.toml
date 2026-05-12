@@ -27,6 +27,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "net", "io-util"] }
 
 # niri-ipc is not semver-stable: variants get added in patch bumps.
 # Pin to the exact niri-git rev installed locally (niri 25.11-157-g4d214891).
