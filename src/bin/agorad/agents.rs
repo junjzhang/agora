@@ -68,10 +68,9 @@ pub(crate) fn apply_hook(state: &State, cli: &str, event: &str, payload: &serde_
         (notify, inner.config.notify, liveness_action)
     };
 
-    if let (Some(liveness), Some(action)) = (
-        state.lock().unwrap().liveness.clone(),
-        liveness_action,
-    ) {
+    if let (Some(liveness), Some(action)) =
+        (state.lock().unwrap().liveness.clone(), liveness_action)
+    {
         match action {
             LivenessAction::Watch { session_id, pid } => liveness.watch(session_id, pid),
             LivenessAction::Forget { session_id } => liveness.forget(session_id),
@@ -144,7 +143,9 @@ pub(crate) fn focus(state: &State, session_id: &str) -> Result<()> {
             tracing::warn!(workspace = %ws_name, error = %e, "FocusWorkspace failed");
         }
     }
-    match niri_call(NiriRequest::Action(NiriAction::FocusWindow { id: plan.window }))? {
+    match niri_call(NiriRequest::Action(NiriAction::FocusWindow {
+        id: plan.window,
+    }))? {
         NiriResponse::Handled => Ok(()),
         other => bail!("unexpected niri response to FocusWindow: {other:?}"),
     }
@@ -182,7 +183,10 @@ fn liveness_action_for(
     event: &str,
     payload: &serde_json::Value,
 ) -> Option<LivenessAction> {
-    let session_id = payload.get("session_id").and_then(|v| v.as_str())?.to_string();
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())?
+        .to_string();
     match event {
         "SessionStart" => {
             let pid = payload

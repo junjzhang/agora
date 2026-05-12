@@ -50,21 +50,13 @@ impl RemoteBackend {
 }
 
 impl AgentBackend for RemoteBackend {
-    fn apply_hook(
-        &mut self,
-        cli: AgentCli,
-        event: &str,
-        payload: &Value,
-    ) -> Option<NotifyRequest> {
+    fn apply_hook(&mut self, cli: AgentCli, event: &str, payload: &Value) -> Option<NotifyRequest> {
         apply_hook(&mut self.agents, cli, event, payload)
     }
 
     fn list(&self, ctx: &EnrichCtx) -> Vec<AgentSession> {
         let host = self.host();
-        self.agents
-            .values()
-            .map(|a| enrich(a, host, ctx))
-            .collect()
+        self.agents.values().map(|a| enrich(a, host, ctx)).collect()
     }
 
     fn focus_plan(&self, session_id: &str, ctx: &EnrichCtx) -> anyhow::Result<Option<FocusPlan>> {
@@ -93,7 +85,13 @@ impl AgentBackend for RemoteBackend {
     }
 
     fn has_agent(&self, project_id: &str, cli: Option<AgentCli>, ctx: &EnrichCtx) -> bool {
-        has_matching_agent(&self.agents, project_id, cli, Some(self.host()), ctx.projects)
+        has_matching_agent(
+            &self.agents,
+            project_id,
+            cli,
+            Some(self.host()),
+            ctx.projects,
+        )
     }
 
     fn is_empty(&self) -> bool {

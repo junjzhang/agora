@@ -145,7 +145,9 @@ fn main() -> Result<()> {
 
     {
         let liveness = state.lock().unwrap().liveness.clone();
-        let watches = Arc::new(Mutex::new(HashMap::<String, watcher_sock::WatchEntry>::new()));
+        let watches = Arc::new(Mutex::new(
+            HashMap::<String, watcher_sock::WatchEntry>::new(),
+        ));
         let watcher_path = ipc::watcher_socket_path()?;
         let listener = watcher_sock::bind_socket(&watcher_path)?;
         tracing::info!(path = %watcher_path.display(), "watcher socket listening");
@@ -170,7 +172,10 @@ fn main() -> Result<()> {
 /// `agora hook event SessionEnd` (which reaches the central daemon via the
 /// SSH reverse-forward tunnel).
 fn main_watcher_only() -> Result<()> {
-    tracing::info!("agorad v{} starting (watcher-only)", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "agorad v{} starting (watcher-only)",
+        env!("CARGO_PKG_VERSION")
+    );
     let (liveness, exit_rx) = liveness::spawn();
     let watches: Arc<Mutex<HashMap<String, watcher_sock::WatchEntry>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -348,9 +353,14 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
 fn picker_state(state: &State) -> Payload {
     let projects = state.lock().unwrap().projects.clone();
     let agents = agents::list(state);
-    let workspaces: Vec<agora::ipc::WorkspaceSummary> = state
-        .lock()
-        .unwrap()
+    let inner = state.lock().unwrap();
+    let mut counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+    for c in inner.claims.values() {
+        if let Some(ws_id) = c.workspace_id {
+            *counts.entry(ws_id).or_insert(0) += 1;
+        }
+    }
+    let workspaces: Vec<agora::ipc::WorkspaceSummary> = inner
         .workspaces
         .iter()
         .map(|(&id, w)| agora::ipc::WorkspaceSummary {
@@ -358,8 +368,11 @@ fn picker_state(state: &State) -> Payload {
             name: w.name.clone(),
             is_active: w.is_active,
             is_focused: w.is_focused,
+            idx: w.idx,
+            window_count: counts.get(&id).copied().unwrap_or(0),
         })
         .collect();
+    drop(inner);
     Payload::PickerState {
         projects,
         agents,

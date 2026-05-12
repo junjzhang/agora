@@ -47,12 +47,7 @@ impl LocalBackend {
 }
 
 impl AgentBackend for LocalBackend {
-    fn apply_hook(
-        &mut self,
-        cli: AgentCli,
-        event: &str,
-        payload: &Value,
-    ) -> Option<NotifyRequest> {
+    fn apply_hook(&mut self, cli: AgentCli, event: &str, payload: &Value) -> Option<NotifyRequest> {
         apply_hook(&mut self.agents, cli, event, payload)
     }
 

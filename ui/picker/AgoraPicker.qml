@@ -107,28 +107,27 @@ WlrLayershell {
         }
     }
 
+    // Stable identity for an item, used to keep the selection across
+    // rebuilds. Section rows have no key (they're not selectable anyway).
+    function itemKey(it) {
+        return it?.sessionId || it?.id || it?.name || ""
+    }
+
     function rebuildItems() {
         const q = searchInput.text.toLowerCase()
         const items = []
         const projectNames = new Set(projects.map(p => p.workspace_name))
 
-        const activeWs = new Set()
-        for (const ws of workspaces) { if (ws.name) activeWs.add(ws.name) }
-
-        // Agent map for project badges
+        // Agent map for project badges + agents grouped by project for the
+        // AGENTS section.
         const agentMap = {}
-        for (const a of agents) {
-            if (!a.project) continue
-            const cur = agentMap[a.project]
-            if (!cur || phasePrio(a.phase) > phasePrio(cur.phase))
-                agentMap[a.project] = a
-        }
-
-        // Group agents by project
         const agentsByProject = {}
         const noProjectAgents = []
         for (const a of agents) {
             if (a.project) {
+                const cur = agentMap[a.project]
+                if (!cur || phasePrio(a.phase) > phasePrio(cur.phase))
+                    agentMap[a.project] = a
                 if (!agentsByProject[a.project]) agentsByProject[a.project] = []
                 agentsByProject[a.project].push(a)
             } else {
@@ -136,14 +135,24 @@ WlrLayershell {
             }
         }
 
-        // ── PROJECTS section ──
-        if (root.mode === "projects") {
         const focusedWs = workspaces.find(ws => ws.is_focused)
         const focusedWsName = focusedWs?.name || ""
+        const currentProject = focusedWsName ? projects.find(p => p.workspace_name === focusedWsName) : null
 
-        function makeProjectEntry(p) {
+        // Section helper: push the header lazily on the first matched entry
+        // so we don't end up with empty sections.
+        function pushGroup(label, rows) {
+            let pushed = false
+            for (const r of rows) {
+                if (!r) continue
+                if (!pushed) { items.push({ type: "section", label: label }); pushed = true }
+                items.push(r)
+            }
+        }
+
+        function projectEntry(p) {
             const r = p.roots[p.default_root || 0]
-            return {
+            const entry = {
                 type: "project",
                 name: p.name,
                 host: r.host || "",
@@ -152,119 +161,99 @@ WlrLayershell {
                 wsName: p.workspace_name,
                 agent: agentMap[p.id] || null,
                 agents: agentsByProject[p.id] || [],
-                active: activeWs.has(p.workspace_name),
+                active: workspaces.some(ws => ws.name === p.workspace_name),
                 launchers: r.launchers || [],
                 ts: p.ts_last_active || 0
             }
+            const matched = !q || entry.name.toLowerCase().includes(q) || entry.path.toLowerCase().includes(q)
+            return matched ? entry : null
         }
-        function matchProject(entry) {
-            return !q || entry.name.toLowerCase().includes(q) || entry.path.toLowerCase().includes(q)
+        function wsEntry(ws) {
+            const label = ws.name || ("Workspace " + ws.idx)
+            const entry = { type: "workspace", name: ws.name || "", label: label, wsId: ws.id, idx: ws.idx }
+            const matched = !q || label.toLowerCase().includes(q)
+            return matched ? entry : null
         }
-
-        const currentProject = focusedWsName ? projects.find(p => p.workspace_name === focusedWsName) : null
-        if (currentProject) {
-            const entry = makeProjectEntry(currentProject)
-            if (matchProject(entry)) {
-                items.push({ type: "section", label: "CURRENT" })
-                items.push(entry)
+        function agentEntry(a) {
+            const matched = !q
+                || a.session_id.toLowerCase().includes(q)
+                || (a.last_prompt || "").toLowerCase().includes(q)
+                || (a.project || "").toLowerCase().includes(q)
+            if (!matched) return null
+            return {
+                type: "agent",
+                cli: a.cli || "claude",
+                sessionId: a.session_id,
+                phase: a.phase,
+                project: a.project,
+                host: a.host || "",
+                cwd: a.cwd || "",
+                lastPrompt: a.last_prompt || "",
+                lastMessage: a.last_message || "",
+                slug: a.slug || "",
+                model: a.model || "",
+                startedAt: a.started_at || 0,
+                turnCount: a.turn_count || 0,
+                currentTool: a.current_tool || "",
+                lastChange: a.last_change || 0,
+                effort: a.effort || ""
             }
         }
 
-        const rest = projects.filter(p => !currentProject || p.id !== currentProject.id)
-        if (rest.length > 0) {
-            let pushed = false
-            for (const p of rest) {
-                const entry = makeProjectEntry(p)
-                if (!matchProject(entry)) continue
-                if (!pushed) { items.push({ type: "section", label: "PROJECTS" }); pushed = true }
-                items.push(entry)
-            }
+        if (root.mode === "projects") {
+            // CURRENT: focused workspace, either as project or as bare ws.
+            const currentRow = currentProject ? projectEntry(currentProject)
+                : focusedWs ? wsEntry(focusedWs)
+                : null
+            pushGroup("CURRENT", [currentRow])
+
+            // PROJECTS: everything except the current project.
+            pushGroup("PROJECTS",
+                projects
+                    .filter(p => !currentProject || p.id !== currentProject.id)
+                    .map(projectEntry))
+
+            // WORKSPACES: non-project workspaces with at least one window.
+            // The focused (non-project) ws already lives in CURRENT.
+            pushGroup("WORKSPACES",
+                workspaces
+                    .filter(ws => {
+                        if (ws.is_focused && !currentProject) return false
+                        if (ws.name && projectNames.has(ws.name)) return false
+                        return (ws.window_count || 0) > 0
+                    })
+                    .map(wsEntry))
         }
 
-        } // end projects mode
-
-        // ── AGENTS section ──
-        const allAgents = [...agents]
-        const hasAgents = allAgents.length > 0
-        if (root.mode === "agents" && hasAgents) {
-            function matchQ(a) {
-                if (!q) return true
-                return a.session_id.toLowerCase().includes(q)
-                    || (a.last_prompt || "").toLowerCase().includes(q)
-                    || (a.project || "").toLowerCase().includes(q)
-            }
-            function pushAgent(a) {
-                items.push({
-                    type: "agent",
-                    cli: a.cli || "claude",
-                    sessionId: a.session_id,
-                    phase: a.phase,
-                    project: a.project,
-                    host: a.host || "",
-                    cwd: a.cwd || "",
-                    lastPrompt: a.last_prompt || "",
-                    lastMessage: a.last_message || "",
-                    slug: a.slug || "",
-                    model: a.model || "",
-                    startedAt: a.started_at || 0,
-                    turnCount: a.turn_count || 0,
-                    currentTool: a.current_tool || "",
-                    lastChange: a.last_change || 0,
-                    effort: a.effort || ""
-                })
-            }
-
+        if (root.mode === "agents" && agents.length > 0) {
             if (root.agentGroupBy === "status") {
                 const buckets = { "NEEDS YOU": [], "RUNNING": [], "IDLE": [] }
-                for (const a of allAgents) {
-                    if (!matchQ(a)) continue
+                for (const a of agents) {
+                    const row = agentEntry(a)
+                    if (!row) continue
                     if (a.phase === "waiting_permission" || a.phase === "waiting_input")
-                        buckets["NEEDS YOU"].push(a)
+                        buckets["NEEDS YOU"].push(row)
                     else if (a.phase === "running")
-                        buckets["RUNNING"].push(a)
+                        buckets["RUNNING"].push(row)
                     else
-                        buckets["IDLE"].push(a)
+                        buckets["IDLE"].push(row)
                 }
-                for (const label of ["NEEDS YOU", "RUNNING", "IDLE"]) {
-                    if (buckets[label].length === 0) continue
-                    items.push({ type: "section", label: label })
-                    for (const a of buckets[label]) pushAgent(a)
-                }
+                for (const label of ["NEEDS YOU", "RUNNING", "IDLE"]) pushGroup(label, buckets[label])
             } else {
-                const agentProjects = Object.keys(agentsByProject).sort()
-                for (const projId of agentProjects) {
-                    const filtered = agentsByProject[projId].filter(matchQ)
-                    if (filtered.length === 0) continue
-                    items.push({ type: "section", label: projId })
-                    for (const a of filtered) pushAgent(a)
+                for (const projId of Object.keys(agentsByProject).sort()) {
+                    pushGroup(projId, agentsByProject[projId].map(agentEntry))
                 }
-                const filteredNp = noProjectAgents.filter(matchQ)
-                if (filteredNp.length > 0) {
-                    items.push({ type: "section", label: "(no project)" })
-                    for (const a of filteredNp) pushAgent(a)
-                }
+                pushGroup("(no project)", noProjectAgents.map(agentEntry))
             }
         }
 
-        // ── WORKSPACES section ──
-        const nonProjWs = workspaces.filter(ws => ws.name && !projectNames.has(ws.name))
-        if (root.mode === "projects" && nonProjWs.length > 0) {
-            items.push({ type: "section", label: "WORKSPACES" })
-            for (const ws of nonProjWs) {
-                const entry = { type: "workspace", name: ws.name }
-                if (!q || entry.name.toLowerCase().includes(q))
-                    items.push(entry)
-            }
-        }
-
-        const prevId = selectedItem?.sessionId || selectedItem?.id || selectedItem?.name || ""
         filteredItems = items
-        // Try to keep selection on the same item after refresh.
+        // Keep selection on the same item across rebuilds when possible.
+        const prevId = itemKey(selectedItem)
         let found = -1
         if (prevId) {
             for (let i = 0; i < items.length; i++) {
-                const it = items[i]
-                if ((it.sessionId || it.id || it.name || "") === prevId) { found = i; break }
+                if (itemKey(items[i]) === prevId) { found = i; break }
             }
         }
         selectedIndex = found >= 0 ? found : firstSelectable()
@@ -391,17 +380,23 @@ WlrLayershell {
     function getActions(item) {
         if (!item) return []
         if (item.type === "workspace") {
-            const name = item.name
+            const name = item.name || ""
+            // For unnamed workspaces, focus by idx and skip promote (promote
+            // needs a name; user can name first with Ctrl+Shift+A).
+            const focusRef = name || String(item.idx)
+            const actions = [
+                { section: "NAVIGATE" },
+                { label: "Focus workspace", key: "↵", run: () => Quickshell.execDetached(["niri", "msg", "action", "focus-workspace", focusRef]) },
+            ]
+            if (!name) return actions
+
             function promote(launchers) {
                 let args = "niri msg action focus-workspace '" + name + "' && sleep 0.1 && /home/jay/.local/bin/agora promote --name '" + name + "' --rename-ws"
                 for (const l of launchers) args += " --launcher " + l
                 args += " ''"
                 return () => Quickshell.execDetached(["sh", "-c", args])
             }
-
-            return [
-                { section: "NAVIGATE" },
-                { label: "Focus workspace", key: "↵", run: () => Quickshell.execDetached(["niri", "msg", "action", "focus-workspace", name]) },
+            actions.push(
                 { section: "PROMOTE" },
                 { label: "Promote (bare)", key: "", run: promote([]) },
                 { label: "Promote + terminal", key: "", run: promote(["terminal"]) },
@@ -409,7 +404,8 @@ WlrLayershell {
                 { label: "Promote + Claude", key: "", run: promote(["claude", "terminal"]) },
                 { label: "Promote + Codex", key: "", run: promote(["codex", "terminal"]) },
                 { label: "Promote (full stack)", key: "", run: promote(["vscode", "terminal", "claude", "codex"]) },
-            ]
+            )
+            return actions
         }
         if (item.type === "agent") {
             const actions = [
@@ -824,7 +820,7 @@ WlrLayershell {
                                         color: "#444"
                                     }
                                     Text {
-                                        text: listItem.modelData.name || ""
+                                        text: listItem.modelData.label || listItem.modelData.name || ""
                                         color: root.selectedIndex === listItem.index ? "#fff" : "#ccc"
                                         font.pixelSize: 15
                                         font.weight: Font.Medium

@@ -226,6 +226,14 @@ pub struct WorkspaceSummary {
     pub name: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
+    /// niri's per-output 1-based index. Picker shows this when the workspace
+    /// has no name.
+    #[serde(default)]
+    pub idx: u8,
+    /// Number of windows the daemon currently tracks on this workspace.
+    /// Picker uses this to hide empty workspaces.
+    #[serde(default)]
+    pub window_count: u32,
 }
 
 /// One remote, with both stored config and live tunnel status.
