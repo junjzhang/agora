@@ -179,6 +179,12 @@ pub enum Request {
     },
     /// Combined state for picker: projects + agents + workspaces in one call.
     PickerState,
+    /// Inferred inputs for promoting a workspace into a project. Daemon walks
+    /// the workspace's windows (agent cwd, then `/proc/{pid}/cwd`) to suggest
+    /// a name, path, and host. Picker uses this to seed a promote wizard.
+    WorkspaceContext {
+        ws_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +224,24 @@ pub enum Payload {
     },
     Remotes(Vec<RemoteSummary>),
     Remote(RemoteSummary),
+    WorkspaceContext(WorkspaceContext),
+}
+
+/// Promote-wizard seed values inferred by the daemon. All fields can be
+/// blank when the daemon couldn't infer anything useful — the picker is
+/// expected to surface them to the user for editing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceContext {
+    pub ws_id: u64,
+    /// Best-effort project name: workspace name, else basename(suggested_path).
+    pub suggested_name: String,
+    /// Best-effort root path: first agent cwd on this ws, else any window's
+    /// /proc/{pid}/cwd.
+    pub suggested_path: String,
+    /// Remote host if the ws's agent is remote; empty for local.
+    pub host: String,
+    /// Launcher names available in the registry, for the wizard's checklist.
+    pub available_launchers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

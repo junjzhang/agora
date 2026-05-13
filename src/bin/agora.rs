@@ -135,6 +135,11 @@ enum Cmd {
     },
     /// Combined picker state: projects + agents + workspaces (JSON)
     PickerState,
+    /// Inferred promote inputs for a niri workspace (JSON)
+    WorkspaceContext {
+        /// niri workspace id (from `agora picker-state`)
+        ws_id: u64,
+    },
     /// List picker actions for a target as JSON
     Actions {
         /// Target kind (currently: project)
@@ -317,6 +322,14 @@ fn main() -> Result<()> {
         Cmd::PickerState => {
             let payload = call(Request::PickerState)?;
             serde_json::to_writer(std::io::stdout(), &payload).context("serialize picker state")?;
+            println!();
+        }
+        Cmd::WorkspaceContext { ws_id } => {
+            let payload = call(Request::WorkspaceContext { ws_id })?;
+            let Payload::WorkspaceContext(ctx) = payload else {
+                anyhow::bail!("unexpected payload from daemon: {payload:?}");
+            };
+            serde_json::to_writer(std::io::stdout(), &ctx).context("serialize ws context")?;
             println!();
         }
         Cmd::Actions { target, id } => {

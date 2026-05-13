@@ -347,6 +347,88 @@ fn dispatch(req: Request, state: &State) -> Result<Payload> {
             Ok(Payload::Ack)
         }
         Request::PickerState => Ok(picker_state(state)),
+        Request::WorkspaceContext { ws_id } => {
+            Ok(Payload::WorkspaceContext(workspace_context(state, ws_id)))
+        }
+    }
+}
+
+/// Best-effort promote-wizard seed for a niri workspace id. The picker
+/// surfaces the returned values as editable defaults — empty fields just
+/// mean we couldn't infer anything.
+fn workspace_context(state: &State, ws_id: u64) -> agora::ipc::WorkspaceContext {
+    use crate::backend::local::find_window_for_pid;
+    let inner = state.lock().unwrap();
+    let ws_name = inner.workspaces.get(&ws_id).and_then(|w| w.name.clone());
+
+    // Walk agents first: their reported cwd is more trustworthy than reading
+    // /proc/{pid}/cwd of an arbitrary terminal (which is the shell's cwd, not
+    // necessarily the project root).
+    let mut agent_cwd: Option<String> = None;
+    let mut agent_host: Option<String> = None;
+    'outer: for a in inner.local.agents.values() {
+        let Some(pid) = a.pid else { continue };
+        let Some(wid) = find_window_for_pid(&inner.claims, pid) else {
+            continue;
+        };
+        if inner.claims.get(&wid).and_then(|c| c.workspace_id) != Some(ws_id) {
+            continue;
+        }
+        if let Some(cwd) = a.cwd.as_deref() {
+            if !cwd.is_empty() {
+                agent_cwd = Some(cwd.to_string());
+                break 'outer;
+            }
+        }
+    }
+    // Remote agents don't have local PIDs we can walk. Find the SSH terminal
+    // window for the remote host and check if it lives on this workspace.
+    for (host, remote) in &inner.remotes {
+        if remote.agents.is_empty() {
+            continue;
+        }
+        let Some(wid) = crate::backend::remote::find_window_with_ssh_to(&inner.claims, host) else {
+            continue;
+        };
+        if inner.claims.get(&wid).and_then(|c| c.workspace_id) != Some(ws_id) {
+            continue;
+        }
+        for a in remote.agents.values() {
+            if let Some(cwd) = a.cwd.as_deref() {
+                if !cwd.is_empty() {
+                    agent_cwd.get_or_insert_with(|| cwd.to_string());
+                }
+            }
+        }
+        agent_host.get_or_insert_with(|| host.clone());
+    }
+
+    // Terminals (kitty etc.) keep their own cwd at the launch dir; the
+    // useful cwd is the shell descendant's cwd.
+    let pid_cwd: Option<String> = if agent_cwd.is_some() {
+        None
+    } else {
+        inner
+            .claims
+            .values()
+            .filter(|c| c.workspace_id == Some(ws_id))
+            .find_map(|c| crate::procutil::find_shell_cwd(c.pid?))
+    };
+
+    let path = agent_cwd.or(pid_cwd).unwrap_or_default();
+    let name = ws_name.unwrap_or_else(|| {
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+
+    agora::ipc::WorkspaceContext {
+        ws_id,
+        suggested_name: name,
+        suggested_path: path,
+        host: agent_host.unwrap_or_default(),
+        available_launchers: inner.launcher_registry.keys().cloned().collect(),
     }
 }
 

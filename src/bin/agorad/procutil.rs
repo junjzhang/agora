@@ -3,6 +3,40 @@
 
 use std::fs;
 
+/// Walk down from `pid` looking for a shell (zsh/bash/fish/sh). Used to
+/// recover the working directory of a terminal: the terminal's own /proc
+/// cwd is its launch dir, the useful cwd belongs to the shell descendant.
+/// Returns the shell's cwd when found.
+pub(crate) fn find_shell_cwd(start_pid: i32) -> Option<String> {
+    let mut stack = vec![(start_pid, 0u32)];
+    while let Some((pid, depth)) = stack.pop() {
+        if depth > 8 {
+            continue;
+        }
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if matches!(comm.as_str(), "zsh" | "bash" | "fish" | "sh" | "dash") {
+            if let Ok(p) = fs::read_link(format!("/proc/{pid}/cwd")) {
+                let s = p.to_string_lossy().into_owned();
+                if s.starts_with('/') && s != "/" {
+                    return Some(s);
+                }
+            }
+        }
+        let Ok(children) = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
+            continue;
+        };
+        for c in children.split_whitespace() {
+            if let Ok(cpid) = c.parse::<i32>() {
+                stack.push((cpid, depth + 1));
+            }
+        }
+    }
+    None
+}
+
 /// Walk down the child chain from `pid`; stop at the first process with
 /// !=1 children. Returns the final pid (which may be `pid` itself if it
 /// has 0 or >1 children).

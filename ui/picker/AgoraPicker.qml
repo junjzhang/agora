@@ -35,13 +35,51 @@ WlrLayershell {
     onVisibleChanged: {
         if (visible) {
             if (_blurRegion) root.BackgroundEffect.blurRegion = _blurRegion
-            searchInput.text = ""
-            searchInput.forceActiveFocus()
+            searchText = ""
             selectedIndex = 0
-            actionMode = false
+            panelStack = [{ kind: "main", title: root.mode === "agents" ? "Agents" : "Projects" }]
             refreshData()
+            Qt.callLater(() => { if (searchInput) searchInput.forceActiveFocus() })
+        } else {
+            // Collapse to depth 1 so prevSlot/topSlot Loaders deactivate and
+            // the QML tree is small while the picker is idle. Saves work for
+            // the compositor when other overlays (dms spotlight, etc.) animate.
+            panelStack = [{ kind: "main", title: "" }]
         }
     }
+
+    // ── Panel stack ──
+    // The picker is a navigation stack. Tab pushes a new panel (drill in),
+    // Esc/Shift+Tab pops back. Only the top panel renders its body — the
+    // breadcrumb header above shows the path. actionMode and wizardMode are
+    // derived from the stack so the legacy bindings stay valid; new code
+    // should push/pop directly.
+    //
+    // Panel shape:
+    //   { kind: "main" | "actions" | "promote",
+    //     title: string,           // breadcrumb chip label
+    //     data: { ... } }          // panel-specific payload
+    property var panelStack: [{ kind: "main", title: "" }]
+    readonly property var topPanel: panelStack[panelStack.length - 1]
+
+    function pushPanel(p) {
+        panelStack = panelStack.concat([p])
+    }
+    function popPanel() {
+        if (panelStack.length <= 1) { root.visible = false; return }
+        panelStack = panelStack.slice(0, -1)
+        // Return focus to the always-visible search bar (a deeper panel may
+        // have stolen it, e.g. PanelPromote's name input).
+        Qt.callLater(() => { if (searchInput) searchInput.forceActiveFocus() })
+    }
+    function popToDepth(depth) {
+        if (depth < 1) depth = 1
+        if (depth >= panelStack.length) return
+        panelStack = panelStack.slice(0, depth)
+    }
+
+    readonly property bool actionMode: topPanel.kind === "actions"
+    readonly property bool wizardMode: topPanel.kind === "promote"
 
     // ── Data ──
     property var projects: []
@@ -49,13 +87,29 @@ WlrLayershell {
     property var workspaces: []
     property var filteredItems: []
     property int selectedIndex: 0
-    property bool actionMode: false
     property int actionIndex: 0
     property var actionList: []
     property string actionRequestKey: ""
+    // Search box text lives at root so it survives PanelMain's Loader being
+    // destroyed/recreated when the panel goes from full → compact and back.
+    property string searchText: ""
+    onSearchTextChanged: rebuildItems()
 
     property var selectedItem: filteredItems.length > 0 && selectedIndex < filteredItems.length
         ? filteredItems[selectedIndex] : null
+
+    // Entry point used by PanelMain's workspace action.
+    function openPromoteWizard(item) {
+        pushPanel({
+            kind: "promote",
+            title: "Promote",
+            data: {
+                wsId: item.wsId || 0,
+                wsLabel: item.label || item.name || "",
+                seedName: item.name || "",
+            },
+        })
+    }
 
     function refreshData() {
         stateProc.running = true
@@ -106,15 +160,23 @@ WlrLayershell {
             }
         }
     }
-
     // Stable identity for an item, used to keep the selection across
     // rebuilds. Section rows have no key (they're not selectable anyway).
     function itemKey(it) {
         return it?.sessionId || it?.id || it?.name || ""
     }
 
+    // Breadcrumb title for an item — used when pushing into an actions panel.
+    function panelTitleFor(it) {
+        if (!it) return ""
+        if (it.type === "project") return it.name || it.id || "Project"
+        if (it.type === "agent") return (it.slug || it.sessionId || "Agent").slice(0, 24)
+        if (it.type === "workspace") return it.label || it.name || ("Workspace " + (it.idx || ""))
+        return ""
+    }
+
     function rebuildItems() {
-        const q = searchInput.text.toLowerCase()
+        const q = (root.searchText || "").toLowerCase()
         const items = []
         const projectNames = new Set(projects.map(p => p.workspace_name))
 
@@ -381,31 +443,13 @@ WlrLayershell {
         if (!item) return []
         if (item.type === "workspace") {
             const name = item.name || ""
-            // For unnamed workspaces, focus by idx and skip promote (promote
-            // needs a name; user can name first with Ctrl+Shift+A).
             const focusRef = name || String(item.idx)
-            const actions = [
+            return [
                 { section: "NAVIGATE" },
                 { label: "Focus workspace", key: "↵", run: () => Quickshell.execDetached(["niri", "msg", "action", "focus-workspace", focusRef]) },
-            ]
-            if (!name) return actions
-
-            function promote(launchers) {
-                let args = "niri msg action focus-workspace '" + name + "' && sleep 0.1 && /home/jay/.local/bin/agora promote --name '" + name + "' --rename-ws"
-                for (const l of launchers) args += " --launcher " + l
-                args += " ''"
-                return () => Quickshell.execDetached(["sh", "-c", args])
-            }
-            actions.push(
                 { section: "PROMOTE" },
-                { label: "Promote (bare)", key: "", run: promote([]) },
-                { label: "Promote + terminal", key: "", run: promote(["terminal"]) },
-                { label: "Promote + VS Code", key: "", run: promote(["vscode", "terminal"]) },
-                { label: "Promote + Claude", key: "", run: promote(["claude", "terminal"]) },
-                { label: "Promote + Codex", key: "", run: promote(["codex", "terminal"]) },
-                { label: "Promote (full stack)", key: "", run: promote(["vscode", "terminal", "claude", "codex"]) },
-            )
-            return actions
+                { label: "Promote workspace...", key: "Tab", tab: true, run: () => root.openPromoteWizard(item), keepOpen: true },
+            ]
         }
         if (item.type === "agent") {
             const actions = [
@@ -466,8 +510,9 @@ WlrLayershell {
 
     function executeAction() {
         if (actionIndex >= 0 && actionIndex < actionList.length && actionList[actionIndex].run) {
-            actionList[actionIndex].run()
-            root.visible = false
+            const act = actionList[actionIndex]
+            act.run()
+            if (!act.keepOpen) root.visible = false
         }
     }
 
@@ -486,10 +531,8 @@ WlrLayershell {
         return 0
     }
 
-    onActionIndexChanged: {
-        if (!actionMode || actionIndex < 0) return
-        actionListView.positionViewAtIndex(actionIndex, ListView.Contain)
-    }
+    // Scroll-into-view is now handled inside PanelActions itself (currentIndex
+    // binding takes care of it for ListView).
 
     // ── Scrim ──
     MouseArea {
@@ -520,8 +563,8 @@ WlrLayershell {
     Rectangle {
         id: panel
         anchors.centerIn: parent
-        width: Math.min(parent.width * 0.55, 780)
-        height: Math.min(parent.height * 0.58, 540)
+        width: Math.min(parent.width * 0.6, 880)
+        height: Math.min(parent.height * 0.6, 580)
         radius: 16
         color: Qt.rgba(0.08, 0.08, 0.08, 0.65)
         border.color: Qt.rgba(1, 1, 1, 0.1)
@@ -537,67 +580,94 @@ WlrLayershell {
             anchors.fill: parent
             spacing: 0
 
-            // ── Search Bar ──
+            // ── Search Bar (fixed top, spans full width regardless of stack depth) ──
             Item {
                 width: parent.width
                 height: 48
 
-                    TextInput {
-                        id: searchInput
-                        anchors.fill: parent
-                        anchors.leftMargin: 20
-                        anchors.rightMargin: 20
-                        verticalAlignment: TextInput.AlignVCenter
-                        color: "#e0e0e0"
-                        font.pixelSize: 16
-                        clip: true
-                        onTextChanged: root.rebuildItems()
+                TextInput {
+                    id: searchInput
+                    anchors.fill: parent
+                    anchors.leftMargin: 20
+                    anchors.rightMargin: 20
+                    verticalAlignment: TextInput.AlignVCenter
+                    color: "#e0e0e0"
+                    font.pixelSize: 16
+                    clip: true
+                    text: root.searchText
+                    onTextChanged: root.searchText = text
 
-                        Keys.onPressed: event => {
-                            const shift = event.modifiers & Qt.ShiftModifier
-                            if (event.key === Qt.Key_Escape) {
-                                if (root.actionMode) { root.actionMode = false; event.accepted = true }
-                                else { root.visible = false; event.accepted = true }
-                            } else if (event.key === Qt.Key_Tab) {
-                                root.actionMode = !root.actionMode
-                                if (root.actionMode) {
+                    Keys.onPressed: event => {
+                        if (event.key === Qt.Key_Escape) {
+                            root.popPanel()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Tab) {
+                            const top = root.topPanel.kind
+                            if (top === "main") {
+                                if (root.selectedItem) {
+                                    root.pushPanel({
+                                        kind: "actions",
+                                        title: root.panelTitleFor(root.selectedItem),
+                                    })
                                     root.loadActions(root.selectedItem)
                                 }
-                                event.accepted = true
-                            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                                if (root.actionMode) root.executeAction()
-                                else root.executeItem(root.selectedItem)
-                                event.accepted = true
-                            } else if (event.key === Qt.Key_Down) {
-                                if (root.actionMode) root.actionIndex = root.nextActionIndex(root.actionIndex, 1)
-                                else root.selectedIndex = root.nextSelectable(root.selectedIndex, 1)
-                                event.accepted = true
-                            } else if (event.key === Qt.Key_Up) {
-                                if (root.actionMode) root.actionIndex = root.nextActionIndex(root.actionIndex, -1)
-                                else root.selectedIndex = root.nextSelectable(root.selectedIndex, -1)
-                                event.accepted = true
-                            } else if (event.key === Qt.Key_G && (event.modifiers & Qt.ControlModifier)) {
-                                if (root.mode === "agents") {
-                                    root.agentGroupBy = root.agentGroupBy === "status" ? "project" : "status"
-                                    root.rebuildItems()
+                            } else if (top === "actions") {
+                                const cur = root.actionList[root.actionIndex]
+                                if (cur && cur.tab && cur.run) {
+                                    cur.run()
+                                    if (!cur.keepOpen) root.visible = false
+                                } else {
+                                    root.popPanel()
                                 }
-                                event.accepted = true
                             }
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                            const top = root.topPanel.kind
+                            if (top === "main") root.executeItem(root.selectedItem)
+                            else if (top === "actions") root.executeAction()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Down) {
+                            if (root.topPanel.kind === "actions") {
+                                root.actionIndex = root.nextActionIndex(root.actionIndex, 1)
+                            } else {
+                                root.selectedIndex = root.nextSelectable(root.selectedIndex, 1)
+                            }
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Up) {
+                            if (root.topPanel.kind === "actions") {
+                                root.actionIndex = root.nextActionIndex(root.actionIndex, -1)
+                            } else {
+                                root.selectedIndex = root.nextSelectable(root.selectedIndex, -1)
+                            }
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_G && (event.modifiers & Qt.ControlModifier)) {
+                            if (root.mode === "agents") {
+                                root.agentGroupBy = root.agentGroupBy === "status" ? "project" : "status"
+                                root.rebuildItems()
+                            }
+                            event.accepted = true
                         }
                     }
+                }
 
-                    Text {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 20
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.mode === "agents" ? "Search agents..." : "Search projects..."
-                        color: "#555"
-                        font.pixelSize: 16
-                        visible: searchInput.text.length === 0 && !searchInput.preeditText
-                    }
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 20
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.mode === "agents" ? "Search agents..." : "Search projects..."
+                    color: "#555"
+                    font.pixelSize: 16
+                    visible: searchInput.text.length === 0 && !searchInput.preeditText
+                }
             }
 
-            // ── Content: Left list + Right detail ──
+            Rectangle { width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.06) }
+
+            // ── Body: panel slots ──
+            // Two-column stack view. Left = panelStack[depth-2] in compact
+            // mode (visible only when depth >= 2); right = top panel in full
+            // mode. Beyond depth 2 the deeper ancestors are not rendered;
+            // breadcrumb in the footer remains the source of truth.
             Item {
                 width: parent.width
                 height: parent.height - 48 - 1 - 40 - 1
@@ -606,609 +676,149 @@ WlrLayershell {
                     anchors.fill: parent
                     spacing: 0
 
-                    // ── Left: Item List ──
-                    Rectangle {
-                        id: leftBg
-                        width: root.actionMode ? parent.width * 0.35 : parent.width * 0.6
-                        Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    // Main panel lives outside the Loader system: its
+                    // ListView delegate is heavy and rebuilding it on every
+                    // Tab is what made the previous design feel laggy.
+                    // Instead it stays alive and we toggle compact + width.
+                    PanelMain {
+                        id: mainPanel
+                        picker: root
+                        readonly property int prevIdx: root.panelStack.length - 2
+                        readonly property bool isTop: root.topPanel.kind === "main"
+                        readonly property bool isPrev: prevIdx >= 0 && root.panelStack[prevIdx].kind === "main"
+                        compact: !isTop && isPrev
+                        visible: isTop || isPrev
+                        width: isTop ? parent.width : (isPrev ? parent.width * 0.35 : 0)
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
                         height: parent.height
-                        color: root.actionMode ? Qt.rgba(1, 1, 1, 0.02) : Qt.rgba(1, 1, 1, 0.04)
-                        Behavior on color { ColorAnimation { duration: 200 } }
+                    }
 
-                    ListView {
-                        id: mainListView
-                        anchors.fill: parent
-                        anchors.margins: 8
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
-                        model: root.filteredItems
-                        spacing: 3
-                        currentIndex: root.selectedIndex
+                    Rectangle {
+                        visible: mainPanel.visible && (prevSlot.visible || topSlot.visible)
+                        width: 1
+                        height: parent.height
+                        color: Qt.rgba(1, 1, 1, 0.06)
+                    }
 
-                        delegate: Item {
-                            id: listItem
+                    // Previous-layer slot — only used when prev is *not* main
+                    // (e.g. depth=3 with prev=actions). When prev==main, the
+                    // sibling PanelMain already handles it.
+                    Loader {
+                        id: prevSlot
+                        readonly property int prevIdx: root.panelStack.length - 2
+                        readonly property string prevKind: prevIdx >= 0 ? root.panelStack[prevIdx].kind : ""
+                        visible: root.panelStack.length >= 2 && prevKind !== "main"
+                        active: visible
+                        width: visible ? parent.width * 0.35 : 0
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        height: parent.height
+                        sourceComponent: {
+                            switch (prevKind) {
+                                case "actions": return actionsComp
+                                case "promote": return promoteComp
+                            }
+                            return null
+                        }
+                        onLoaded: if (item && item.hasOwnProperty("compact")) item.compact = true
+                    }
+
+                    Rectangle {
+                        visible: prevSlot.visible && topSlot.visible
+                        width: 1
+                        height: parent.height
+                        color: Qt.rgba(1, 1, 1, 0.06)
+                    }
+
+                    // Top-layer slot — for everything but main on top.
+                    Loader {
+                        id: topSlot
+                        readonly property string topKind: root.topPanel.kind
+                        visible: topKind !== "main"
+                        active: visible
+                        readonly property int dividerCount:
+                            (mainPanel.visible ? 1 : 0) + (prevSlot.visible ? 1 : 0)
+                        width: visible
+                            ? parent.width - mainPanel.width - prevSlot.width - dividerCount
+                            : 0
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        height: parent.height
+                        sourceComponent: {
+                            switch (topKind) {
+                                case "actions": return actionsComp
+                                case "promote": return promoteComp
+                            }
+                            return null
+                        }
+                        onLoaded: if (item && item.hasOwnProperty("compact")) item.compact = false
+                    }
+                }
+            }
+
+
+            // ── Bottom Divider ──
+            Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.06) }
+
+            // ── Bottom Action Bar ──
+            // Left side: breadcrumb (panel stack path). Right side: keyboard
+            // hints. Both share one fixed-height row so the bar never moves.
+            Rectangle {
+                width: parent.width
+                height: 40
+                color: "transparent"
+
+                // Breadcrumb (left).
+                Row {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 16
+                    spacing: 4
+                    Repeater {
+                        model: root.panelStack
+                        Row {
                             required property var modelData
                             required property int index
-                            width: mainListView.width
-                            height: modelData.type === "section" ? 32
-                                  : modelData.type === "agent" ? (modelData.lastPrompt ? 52 : 42)
-                                  : 42
-                            visible: true
-
-                            // ── Section header ──
+                            spacing: 4
+                            anchors.verticalCenter: parent.verticalCenter
                             Text {
-                                visible: listItem.modelData.type === "section"
-                                text: listItem.modelData.label || ""
-                                color: {
-                                    const l = listItem.modelData.label || ""
-                                    if (l === "NEEDS YOU") return "#EF5350"
-                                    if (l === "RUNNING") return "#66BB6A"
-                                    if (l === "IDLE") return "#888"
-                                    return "#777"
-                                }
-                                font.pixelSize: 12
-                                font.weight: Font.Bold
-                                font.letterSpacing: 1
-                                leftPadding: 8
+                                visible: parent.index > 0
+                                text: "›"
+                                color: "#444"
+                                font.pixelSize: 13
                                 anchors.verticalCenter: parent.verticalCenter
                             }
-
-                            // ── Selectable items (project / agent / workspace) ──
                             Rectangle {
-                                visible: listItem.modelData.type === "project" || listItem.modelData.type === "agent" || listItem.modelData.type === "workspace"
-                                anchors.fill: parent
-                                radius: 8
-                                color: root.selectedIndex === listItem.index
-                                    ? Qt.rgba(1, 1, 1, 0.14)
-                                    : itemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-                                Behavior on color { ColorAnimation { duration: 80 } }
-
+                                readonly property bool isTop: parent.index === root.panelStack.length - 1
+                                radius: 5
+                                height: 20
+                                width: bcText.implicitWidth + 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: isTop
+                                    ? Qt.rgba(0.4, 0.7, 1, 0.22)
+                                    : bcMa.containsMouse ? Qt.rgba(1,1,1,0.08) : Qt.rgba(1,1,1,0.03)
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Text {
+                                    id: bcText
+                                    anchors.centerIn: parent
+                                    text: parent.parent.modelData.title || ""
+                                    color: parent.isTop ? "#fff" : "#999"
+                                    font.pixelSize: 11
+                                    font.weight: parent.isTop ? Font.Medium : Font.Normal
+                                }
                                 MouseArea {
-                                    id: itemMa
+                                    id: bcMa
                                     anchors.fill: parent
                                     hoverEnabled: true
-                                    onClicked: root.executeItem(listItem.modelData)
-                                    onEntered: { root.selectedIndex = listItem.index; root.actionMode = false }
-                                }
-
-                                // Project row
-                                Row {
-                                    visible: listItem.modelData.type === "project"
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.margins: 10
-                                    spacing: 8
-
-                                    Rectangle {
-                                        width: 6; height: 6; radius: 3
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        color: listItem.modelData.agent
-                                            ? root.phaseColor(listItem.modelData.agent.phase)
-                                            : (listItem.modelData.active ? "#4CAF50" : "#444")
-                                    }
-                                    Text {
-                                        text: listItem.modelData.name || ""
-                                        color: root.selectedIndex === listItem.index ? "#fff" : "#ccc"
-                                        font.pixelSize: 15
-                                        font.weight: Font.Medium
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        elide: Text.ElideRight
-                                    }
-                                    Item { width: 1; height: 1 }
-                                    Rectangle {
-                                        visible: !root.actionMode && (listItem.modelData.agent != null || (listItem.modelData.active || false))
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: projBadge.implicitWidth + 8; height: 16; radius: 8
-                                        color: listItem.modelData.agent
-                                            ? Qt.rgba(root.phaseColor(listItem.modelData.agent.phase).r || 0.5,
-                                                       root.phaseColor(listItem.modelData.agent.phase).g || 0.5,
-                                                       root.phaseColor(listItem.modelData.agent.phase).b || 0.5, 0.15)
-                                            : Qt.rgba(0.3, 0.69, 0.31, 0.12)
-                                        Text {
-                                            id: projBadge
-                                            anchors.centerIn: parent
-                                            text: listItem.modelData.agent ? root.phaseLabel(listItem.modelData.agent.phase) : (listItem.modelData.active ? "active" : "")
-                                            font.pixelSize: 10
-                                            color: listItem.modelData.agent ? root.phaseColor(listItem.modelData.agent.phase) : "#66BB6A"
-                                        }
-                                    }
-                                }
-
-                                // Agent row
-                                Column {
-                                    visible: listItem.modelData.type === "agent"
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.margins: 10
-                                    spacing: 2
-
-                                    Row {
-                                        spacing: 8
-                                        Rectangle {
-                                            width: 18; height: 18; radius: 4
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            color: Qt.rgba(root.phaseColor(listItem.modelData.phase || "idle").r || 0.4,
-                                                           root.phaseColor(listItem.modelData.phase || "idle").g || 0.4,
-                                                           root.phaseColor(listItem.modelData.phase || "idle").b || 0.4, 0.2)
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: (listItem.modelData.cli || "claude") === "codex" ? "X" : "C"
-                                                font.pixelSize: 11
-                                                font.weight: Font.Bold
-                                                color: root.phaseColor(listItem.modelData.phase || "idle")
-                                            }
-                                        }
-                                        Text {
-                                            text: root.agentGroupBy === "status"
-                                                ? (listItem.modelData.project || "(no project)")
-                                                : root.phaseLabel(listItem.modelData.phase || "idle")
-                                            color: root.agentGroupBy === "project"
-                                                ? root.phaseColor(listItem.modelData.phase || "idle")
-                                                : (root.selectedIndex === listItem.index ? "#fff" : "#ccc")
-                                            font.pixelSize: 15
-                                            font.weight: Font.Medium
-                                            elide: Text.ElideRight
-                                        }
-                                        Rectangle {
-                                            visible: !root.actionMode
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            width: sidBadge.implicitWidth + 8; height: 16; radius: 8
-                                            color: Qt.rgba(1, 1, 1, 0.08)
-                                            Text {
-                                                id: sidBadge
-                                                anchors.centerIn: parent
-                                                text: listItem.modelData.slug || ((listItem.modelData.host || "local") + " · " + (listItem.modelData.sessionId || "").substring(0, 8))
-                                                font.pixelSize: 10
-                                                color: "#888"
-                                            }
-                                        }
-                                        Rectangle {
-                                            visible: !root.actionMode && !!(listItem.modelData.model)
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            width: itemModelLabel.implicitWidth + 8; height: 16; radius: 4
-                                            color: Qt.rgba(root.modelColor(listItem.modelData.model || "").r || 0.5,
-                                                           root.modelColor(listItem.modelData.model || "").g || 0.5,
-                                                           root.modelColor(listItem.modelData.model || "").b || 0.5, 0.12)
-                                            Text {
-                                                id: itemModelLabel
-                                                anchors.centerIn: parent
-                                                text: root.shortModel(listItem.modelData.model || "")
-                                                font.pixelSize: 10
-                                                color: root.modelColor(listItem.modelData.model || "")
-                                            }
-                                        }
-                                        Rectangle {
-                                            visible: !root.actionMode && !!(listItem.modelData.effort)
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            width: itemEffortLabel.implicitWidth + 8; height: 16; radius: 4
-                                            color: Qt.rgba(1, 1, 1, 0.06)
-                                            Text {
-                                                id: itemEffortLabel
-                                                anchors.centerIn: parent
-                                                text: listItem.modelData.effort || ""
-                                                font.pixelSize: 10
-                                                color: "#888"
-                                            }
-                                        }
-                                    }
-                                    Text {
-                                        visible: !!(listItem.modelData.currentTool) || !!(listItem.modelData.lastPrompt)
-                                        text: listItem.modelData.currentTool
-                                            ? "▸ " + listItem.modelData.currentTool
-                                            : (listItem.modelData.lastPrompt || "")
-                                        color: listItem.modelData.currentTool ? root.phaseColor("running") : "#888"
-                                        font.pixelSize: 13
-                                        elide: Text.ElideRight
-                                        maximumLineCount: 1
-                                        width: parent.width
-                                    }
-                                }
-
-                                // Workspace row
-                                Row {
-                                    visible: listItem.modelData.type === "workspace"
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.margins: 10
-                                    spacing: 8
-                                    Rectangle {
-                                        width: 6; height: 6; radius: 3
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        color: "#444"
-                                    }
-                                    Text {
-                                        text: listItem.modelData.label || listItem.modelData.name || ""
-                                        color: root.selectedIndex === listItem.index ? "#fff" : "#ccc"
-                                        font.pixelSize: 15
-                                        font.weight: Font.Medium
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    } // end left bg
-
-                    // ── Vertical Divider ──
-                    Rectangle { width: 1; height: parent.height; color: Qt.rgba(1,1,1,0.06) }
-
-                    // ── Right: Detail / Actions ──
-                    Rectangle {
-                        width: parent.width - leftBg.width - 1
-                        height: parent.height
-                        color: root.actionMode ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(1, 1, 1, 0.01)
-                        Behavior on color { ColorAnimation { duration: 200 } }
-
-                    Item {
-                        anchors.fill: parent
-                        height: parent.height
-
-                        // Detail view (when not in action mode)
-                        Column {
-                            visible: !root.actionMode && root.selectedItem != null
-                            anchors.fill: parent
-                            anchors.margins: 20
-                            anchors.topMargin: 24
-                            spacing: 0
-
-                            // Project detail
-                            Column {
-                                width: parent.width
-                                spacing: 16
-                                visible: root.selectedItem?.type === "project"
-
-                                // Path
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    Text { text: "PATH"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Text {
-                                        text: {
-                                            if (!root.selectedItem || !root.selectedItem.path) return ""
-                                            const h = root.selectedItem.host ? root.selectedItem.host + ":" : ""
-                                            return h + root.selectedItem.path.replace(/^\/home\/[^\/]+/, "~")
-                                        }
-                                        color: "#ccc"
-                                        font.pixelSize: 14
-                                        width: parent.width
-                                        elide: Text.ElideMiddle
-                                    }
-                                }
-
-                                // Agents
-                                Column {
-                                    width: parent.width
-                                    spacing: 6
-                                    visible: (root.selectedItem?.agents?.length || 0) > 0
-
-                                    Text { text: "AGENTS  (Shift+↑↓ select, Shift+↵ focus)"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-
-                                    Repeater {
-                                        model: root.selectedItem?.agents || []
-                                        Rectangle {
-                                            required property var modelData
-                                            required property int index
-                                            width: parent.width
-                                            height: agentInner.implicitHeight + 6
-                                            radius: 6
-                                            color: root.agentIndex === index ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
-                                            Behavior on color { ColorAnimation { duration: 100 } }
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onEntered: root.agentIndex = index
-                                                onClicked: {
-                                                    Quickshell.execDetached(["/home/jay/.local/bin/agora", "focus-agent", modelData.session_id])
-                                                    root.visible = false
-                                                }
-                                            }
-
-                                        Column {
-                                            id: agentInner
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            anchors.margins: 4
-                                            spacing: 2
-                                            Row {
-                                                spacing: 6
-                                                Rectangle {
-                                                    width: 5; height: 5; radius: 2.5
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    color: root.phaseColor(modelData.phase)
-                                                }
-                                                Text {
-                                                    text: root.phaseLabel(modelData.phase)
-                                                    color: root.phaseColor(modelData.phase)
-                                                    font.pixelSize: 13
-                                                }
-                                            }
-                                            Text {
-                                                text: modelData.last_prompt || ""
-                                                color: "#777"
-                                                font.pixelSize: 12
-                                                elide: Text.ElideRight
-                                                maximumLineCount: 1
-                                                width: parent.width
-                                                visible: !!modelData.last_prompt
-                                            }
-                                        }
-                                        }
-                                    }
-                                }
-
-                                // Launchers
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    visible: (root.selectedItem?.launchers?.length || 0) > 0
-                                    Text { text: "LAUNCHERS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Row {
-                                        spacing: 6
-                                        Repeater {
-                                            model: root.selectedItem?.launchers || []
-                                            Rectangle {
-                                                required property var modelData
-                                                width: lText.implicitWidth + 10; height: 20; radius: 4
-                                                color: Qt.rgba(1,1,1,0.06)
-                                                Text {
-                                                    id: lText
-                                                    anchors.centerIn: parent
-                                                    text: modelData
-                                                    color: "#aaa"
-                                                    font.pixelSize: 12
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Workspace detail
-                            Column {
-                                width: parent.width
-                                spacing: 8
-                                visible: root.selectedItem?.type === "workspace"
-                                Text { text: "WORKSPACE"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                Text {
-                                    text: "Not yet tracked as a project."
-                                    color: "#888"
-                                    font.pixelSize: 14
-                                }
-                                Text {
-                                    text: "Press Tab for promote options"
-                                    color: "#666"
-                                    font.pixelSize: 13
-                                }
-                            }
-
-                            // Agent detail
-                            Column {
-                                width: parent.width
-                                spacing: 16
-                                visible: root.selectedItem?.type === "agent"
-
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    Text { text: "SESSION"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Text {
-                                        text: root.selectedItem?.sessionId || ""
-                                        color: "#ccc"
-                                        font.pixelSize: 13
-                                        font.family: "monospace"
-                                    }
-                                }
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    Text { text: "STATUS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Row {
-                                        spacing: 6
-                                        Rectangle {
-                                            width: 6; height: 6; radius: 3
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            color: root.phaseColor(root.selectedItem?.phase || "idle")
-                                        }
-                                        Text {
-                                            text: root.phaseLabel(root.selectedItem?.phase || "idle")
-                                            color: root.phaseColor(root.selectedItem?.phase || "idle")
-                                            font.pixelSize: 14
-                                        }
-                                    }
-                                }
-                                Row {
-                                    width: parent.width
-                                    spacing: 8
-                                    visible: !!(root.selectedItem?.model) || !!(root.selectedItem?.effort)
-                                    Rectangle {
-                                        visible: !!(root.selectedItem?.model)
-                                        width: modelLabel.implicitWidth + 12; height: 22; radius: 4
-                                        color: Qt.rgba(root.modelColor(root.selectedItem?.model || "").r || 0.5,
-                                                       root.modelColor(root.selectedItem?.model || "").g || 0.5,
-                                                       root.modelColor(root.selectedItem?.model || "").b || 0.5, 0.15)
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Text {
-                                            id: modelLabel
-                                            anchors.centerIn: parent
-                                            text: root.shortModel(root.selectedItem?.model || "")
-                                            color: root.modelColor(root.selectedItem?.model || "")
-                                            font.pixelSize: 12
-                                            font.weight: Font.Medium
-                                            font.family: "monospace"
-                                        }
-                                    }
-                                    Rectangle {
-                                        visible: !!(root.selectedItem?.effort)
-                                        width: effortLabel.implicitWidth + 12; height: 22; radius: 4
-                                        color: Qt.rgba(1, 1, 1, 0.06)
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Text {
-                                            id: effortLabel
-                                            anchors.centerIn: parent
-                                            text: root.selectedItem?.effort || ""
-                                            color: "#aaa"
-                                            font.pixelSize: 12
-                                            font.weight: Font.Medium
-                                        }
-                                    }
-                                }
-                                Row {
-                                    width: parent.width
-                                    spacing: 16
-                                    Column {
-                                        spacing: 3
-                                        visible: !!(root.selectedItem?.startedAt)
-                                        Text { text: "DURATION"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                        Text { text: root.formatDuration(root.selectedItem?.startedAt || 0); color: "#ccc"; font.pixelSize: 13 }
-                                    }
-                                    Column {
-                                        spacing: 3
-                                        visible: (root.selectedItem?.turnCount || 0) > 0
-                                        Text { text: "TURNS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                        Text { text: String(root.selectedItem?.turnCount || 0); color: "#ccc"; font.pixelSize: 13 }
-                                    }
-                                    Column {
-                                        spacing: 3
-                                        visible: !!(root.selectedItem?.lastChange)
-                                        Text { text: "LAST ACTIVE"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                        Text { text: root.timeAgo(root.selectedItem?.lastChange || 0); color: "#888"; font.pixelSize: 13 }
-                                    }
-                                }
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    visible: !!(root.selectedItem?.currentTool)
-                                    Text { text: "CURRENT TOOL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Text {
-                                        text: root.selectedItem?.currentTool || ""
-                                        color: root.phaseColor("running")
-                                        font.pixelSize: 13
-                                        font.family: "monospace"
-                                    }
-                                }
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    visible: !!(root.selectedItem?.host)
-                                    Text { text: "HOST"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Text { text: root.selectedItem?.host || ""; color: "#ccc"; font.pixelSize: 14 }
-                                }
-                                Column {
-                                    width: parent.width
-                                    spacing: 3
-                                    visible: !!(root.selectedItem?.lastPrompt)
-                                    Text { text: "LAST PROMPT"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
-                                    Text {
-                                        text: root.selectedItem?.lastPrompt || ""
-                                        color: "#ccc"
-                                        font.pixelSize: 13
-                                        wrapMode: Text.WordWrap
-                                        width: parent.width
-                                        maximumLineCount: 3
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                            }
-                        }
-
-                        // Action list (when in action mode)
-                        ListView {
-                            id: actionListView
-                            visible: root.actionMode
-                            anchors.fill: parent
-                            anchors.margins: 8
-                            clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            model: root.actionList
-                            spacing: 2
-                            currentIndex: root.actionIndex
-
-                            delegate: Item {
-                                id: aItem
-                                required property var modelData
-                                required property int index
-                                width: actionListView.width
-                                height: modelData.section ? secText.implicitHeight : 32
-
-                                // Section header
-                                Text {
-                                    id: secText
-                                    visible: !!aItem.modelData.section
-                                    text: aItem.modelData.section || ""
-                                    color: "#666"
-                                    font.pixelSize: 11
-                                    font.weight: Font.Bold
-                                    font.letterSpacing: 1
-                                    leftPadding: 8
-                                    topPadding: aItem.index > 0 ? 10 : 4
-                                    bottomPadding: 2
-                                }
-
-                                // Action row
-                                Rectangle {
-                                    visible: !aItem.modelData.section
-                                    anchors.fill: parent
-                                    radius: 8
-                                    color: root.actionIndex === aItem.index
-                                        ? Qt.rgba(1, 1, 1, 0.14)
-                                        : aItemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-                                    Behavior on color { ColorAnimation { duration: 80 } }
-
-                                    MouseArea {
-                                        id: aItemMa
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        onClicked: { root.actionIndex = aItem.index; root.executeAction() }
-                                        onEntered: root.actionIndex = aItem.index
-                                    }
-
-                                    Row {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        anchors.margins: 10
-                                        spacing: 8
-
-                                        Text {
-                                            text: aItem.modelData.label || ""
-                                            color: root.actionIndex === aItem.index ? "#fff" : "#bbb"
-                                            font.pixelSize: 14
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
-
-                                        Item { width: 1; height: 1 }
-
-                                        Text {
-                                            visible: (aItem.modelData.key || "").length > 0
-                                            text: aItem.modelData.key || ""
-                                            color: "#555"
-                                            font.pixelSize: 12
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
+                                    cursorShape: parent.isTop ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (!parent.isTop) root.popToDepth(parent.parent.index + 1)
                                     }
                                 }
                             }
                         }
                     }
                 }
-                } // end right bg
-            }
 
-            // ── Bottom Divider ──
-            Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.06) }
-
-            // ── Bottom Action Bar ──
-            Rectangle {
-                width: parent.width
-                height: 40
-                color: "transparent"
-
+                // Keyboard hints (right).
                 Row {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.right: parent.right
@@ -1256,6 +866,799 @@ WlrLayershell {
                             anchors.verticalCenter: parent.verticalCenter
                             Text { id: enterLabel; anchors.centerIn: parent; text: "↵"; color: "#aaa"; font.pixelSize: 11; font.weight: Font.Medium }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Panel components ──
+    // Each panel kind has its inline component below. The Component { id:
+    // ... } wrappers expose them to Loader.sourceComponent. Panels receive
+    // a `picker` ref to call into root state (push/pop, projects, …) and
+    // their per-panel input via `data: ...`.
+
+    Component {
+        id: mainComp
+        PanelMain { picker: root }
+    }
+
+    /// Root list panel — renders the projects/agents/workspaces list plus the
+    /// selected-item detail. Search bar is owned by the root frame (always
+    /// visible), so this panel is purely about content. `compact` collapses
+    /// the detail column to 0 width when this panel is showing as the
+    /// previous layer of the stack.
+    component PanelMain: Item {
+        id: panel
+        required property var picker
+        property bool compact: false
+
+        Item {
+            anchors.fill: parent
+
+            Row {
+                anchors.fill: parent
+                spacing: 0
+
+                    Rectangle {
+                        id: listBg
+                        width: panel.compact ? parent.width : parent.width * 0.6
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        height: parent.height
+                        color: Qt.rgba(1, 1, 1, 0.04)
+
+                        ListView {
+                            id: mainListView
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            model: panel.picker.filteredItems
+                            spacing: 3
+                            currentIndex: panel.picker.selectedIndex
+                            onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+
+                            delegate: Item {
+                                id: listItem
+                                required property var modelData
+                                required property int index
+                                width: mainListView.width
+                                height: modelData.type === "section" ? 32
+                                      : modelData.type === "agent" ? (modelData.lastPrompt ? 52 : 42)
+                                      : 42
+                                visible: true
+
+                                Text {
+                                    visible: listItem.modelData.type === "section"
+                                    text: listItem.modelData.label || ""
+                                    color: {
+                                        const l = listItem.modelData.label || ""
+                                        if (l === "NEEDS YOU") return "#EF5350"
+                                        if (l === "RUNNING") return "#66BB6A"
+                                        if (l === "IDLE") return "#888"
+                                        return "#777"
+                                    }
+                                    font.pixelSize: 12
+                                    font.weight: Font.Bold
+                                    font.letterSpacing: 1
+                                    leftPadding: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Rectangle {
+                                    visible: listItem.modelData.type === "project" || listItem.modelData.type === "agent" || listItem.modelData.type === "workspace"
+                                    anchors.fill: parent
+                                    radius: 8
+                                    color: panel.picker.selectedIndex === listItem.index
+                                        ? Qt.rgba(1, 1, 1, 0.14)
+                                        : itemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                                    Behavior on color { ColorAnimation { duration: 80 } }
+
+                                    MouseArea {
+                                        id: itemMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        onClicked: panel.picker.executeItem(listItem.modelData)
+                                        onEntered: panel.picker.selectedIndex = listItem.index
+                                    }
+
+                                    // Project row
+                                    Row {
+                                        visible: listItem.modelData.type === "project"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.margins: 10
+                                        spacing: 8
+
+                                        Rectangle {
+                                            width: 6; height: 6; radius: 3
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: listItem.modelData.agent
+                                                ? panel.picker.phaseColor(listItem.modelData.agent.phase)
+                                                : (listItem.modelData.active ? "#4CAF50" : "#444")
+                                        }
+                                        Text {
+                                            text: listItem.modelData.name || ""
+                                            color: panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc"
+                                            font.pixelSize: 15
+                                            font.weight: Font.Medium
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            elide: Text.ElideRight
+                                        }
+                                        Item { width: 1; height: 1 }
+                                        Rectangle {
+                                            visible: !panel.compact && (listItem.modelData.agent != null || (listItem.modelData.active || false))
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: projBadge.implicitWidth + 8; height: 16; radius: 8
+                                            color: listItem.modelData.agent
+                                                ? Qt.rgba(panel.picker.phaseColor(listItem.modelData.agent.phase).r || 0.5,
+                                                           panel.picker.phaseColor(listItem.modelData.agent.phase).g || 0.5,
+                                                           panel.picker.phaseColor(listItem.modelData.agent.phase).b || 0.5, 0.15)
+                                                : Qt.rgba(0.3, 0.69, 0.31, 0.12)
+                                            Text {
+                                                id: projBadge
+                                                anchors.centerIn: parent
+                                                text: listItem.modelData.agent ? panel.picker.phaseLabel(listItem.modelData.agent.phase) : (listItem.modelData.active ? "active" : "")
+                                                font.pixelSize: 10
+                                                color: listItem.modelData.agent ? panel.picker.phaseColor(listItem.modelData.agent.phase) : "#66BB6A"
+                                            }
+                                        }
+                                    }
+
+                                    // Agent row
+                                    Column {
+                                        visible: listItem.modelData.type === "agent"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.margins: 10
+                                        spacing: 2
+
+                                        Row {
+                                            spacing: 8
+                                            Rectangle {
+                                                width: 18; height: 18; radius: 4
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                color: Qt.rgba(panel.picker.phaseColor(listItem.modelData.phase || "idle").r || 0.4,
+                                                               panel.picker.phaseColor(listItem.modelData.phase || "idle").g || 0.4,
+                                                               panel.picker.phaseColor(listItem.modelData.phase || "idle").b || 0.4, 0.2)
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: (listItem.modelData.cli || "claude") === "codex" ? "X" : "C"
+                                                    font.pixelSize: 11
+                                                    font.weight: Font.Bold
+                                                    color: panel.picker.phaseColor(listItem.modelData.phase || "idle")
+                                                }
+                                            }
+                                            Text {
+                                                text: panel.picker.agentGroupBy === "status"
+                                                    ? (listItem.modelData.project || "(no project)")
+                                                    : panel.picker.phaseLabel(listItem.modelData.phase || "idle")
+                                                color: panel.picker.agentGroupBy === "project"
+                                                    ? panel.picker.phaseColor(listItem.modelData.phase || "idle")
+                                                    : (panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc")
+                                                font.pixelSize: 15
+                                                font.weight: Font.Medium
+                                                elide: Text.ElideRight
+                                            }
+                                            Rectangle {
+                                                visible: !panel.compact
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: sidBadge.implicitWidth + 8; height: 16; radius: 8
+                                                color: Qt.rgba(1, 1, 1, 0.08)
+                                                Text {
+                                                    id: sidBadge
+                                                    anchors.centerIn: parent
+                                                    text: listItem.modelData.slug || ((listItem.modelData.host || "local") + " · " + (listItem.modelData.sessionId || "").substring(0, 8))
+                                                    font.pixelSize: 10
+                                                    color: "#888"
+                                                }
+                                            }
+                                            Rectangle {
+                                                visible: !panel.compact && !!(listItem.modelData.model)
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: itemModelLabel.implicitWidth + 8; height: 16; radius: 4
+                                                color: Qt.rgba(panel.picker.modelColor(listItem.modelData.model || "").r || 0.5,
+                                                               panel.picker.modelColor(listItem.modelData.model || "").g || 0.5,
+                                                               panel.picker.modelColor(listItem.modelData.model || "").b || 0.5, 0.12)
+                                                Text {
+                                                    id: itemModelLabel
+                                                    anchors.centerIn: parent
+                                                    text: panel.picker.shortModel(listItem.modelData.model || "")
+                                                    font.pixelSize: 10
+                                                    color: panel.picker.modelColor(listItem.modelData.model || "")
+                                                }
+                                            }
+                                            Rectangle {
+                                                visible: !panel.compact && !!(listItem.modelData.effort)
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: itemEffortLabel.implicitWidth + 8; height: 16; radius: 4
+                                                color: Qt.rgba(1, 1, 1, 0.06)
+                                                Text {
+                                                    id: itemEffortLabel
+                                                    anchors.centerIn: parent
+                                                    text: listItem.modelData.effort || ""
+                                                    font.pixelSize: 10
+                                                    color: "#888"
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            visible: !!(listItem.modelData.currentTool) || !!(listItem.modelData.lastPrompt)
+                                            text: listItem.modelData.currentTool
+                                                ? "▸ " + listItem.modelData.currentTool
+                                                : (listItem.modelData.lastPrompt || "")
+                                            color: listItem.modelData.currentTool ? panel.picker.phaseColor("running") : "#888"
+                                            font.pixelSize: 13
+                                            elide: Text.ElideRight
+                                            maximumLineCount: 1
+                                            width: parent.width
+                                        }
+                                    }
+
+                                    // Workspace row
+                                    Row {
+                                        visible: listItem.modelData.type === "workspace"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.margins: 10
+                                        spacing: 8
+                                        Rectangle {
+                                            width: 6; height: 6; radius: 3
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: "#444"
+                                        }
+                                        Text {
+                                            text: listItem.modelData.label || listItem.modelData.name || ""
+                                            color: panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc"
+                                            font.pixelSize: 15
+                                            font.weight: Font.Medium
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Detail panel (collapses to 0 width when compact) ──
+                    Rectangle {
+                        width: panel.compact ? 0 : 1
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        height: parent.height
+                        color: Qt.rgba(1,1,1,0.06)
+                        clip: true
+                    }
+                    Rectangle {
+                        id: detailBg
+                        width: panel.compact ? 0 : (parent.width - listBg.width - 1)
+                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        height: parent.height
+                        color: Qt.rgba(1, 1, 1, 0.01)
+                        clip: true
+                        opacity: panel.compact ? 0 : 1
+                        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+                        Loader {
+                            anchors.fill: parent
+                            anchors.margins: 20
+                            anchors.topMargin: 24
+                            active: panel.picker.visible && !panel.compact && panel.picker.selectedItem != null
+                            sourceComponent: detailComp
+                        }
+                    }
+                }
+            }
+
+        // Detail content — split out so the binding can short-circuit when the
+        // panel is compact (Loader.active false).
+        Component {
+            id: detailComp
+            Column {
+                spacing: 0
+                anchors.fill: parent
+
+                // Project detail
+                Column {
+                    width: parent.width
+                    spacing: 16
+                    visible: panel.picker.selectedItem?.type === "project"
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        Text { text: "PATH"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Text {
+                            text: {
+                                const sel = panel.picker.selectedItem
+                                if (!sel || !sel.path) return ""
+                                const h = sel.host ? sel.host + ":" : ""
+                                return h + sel.path.replace(/^\/home\/[^\/]+/, "~")
+                            }
+                            color: "#ccc"
+                            font.pixelSize: 14
+                            width: parent.width
+                            elide: Text.ElideMiddle
+                        }
+                    }
+                    Column {
+                        width: parent.width
+                        spacing: 6
+                        visible: (panel.picker.selectedItem?.agents?.length || 0) > 0
+                        Text { text: "AGENTS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Repeater {
+                            model: panel.picker.selectedItem?.agents || []
+                            Rectangle {
+                                required property var modelData
+                                width: parent.width
+                                height: agentInner.implicitHeight + 6
+                                radius: 6
+                                color: "transparent"
+                                Column {
+                                    id: agentInner
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.margins: 4
+                                    spacing: 2
+                                    Row {
+                                        spacing: 6
+                                        Rectangle {
+                                            width: 5; height: 5; radius: 2.5
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: panel.picker.phaseColor(modelData.phase)
+                                        }
+                                        Text {
+                                            text: panel.picker.phaseLabel(modelData.phase)
+                                            color: panel.picker.phaseColor(modelData.phase)
+                                            font.pixelSize: 13
+                                        }
+                                    }
+                                    Text {
+                                        text: modelData.last_prompt || ""
+                                        color: "#777"
+                                        font.pixelSize: 12
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                        width: parent.width
+                                        visible: !!modelData.last_prompt
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        visible: (panel.picker.selectedItem?.launchers?.length || 0) > 0
+                        Text { text: "LAUNCHERS"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Row {
+                            spacing: 6
+                            Repeater {
+                                model: panel.picker.selectedItem?.launchers || []
+                                Rectangle {
+                                    required property string modelData
+                                    width: lText.implicitWidth + 10; height: 20; radius: 4
+                                    color: Qt.rgba(1,1,1,0.06)
+                                    Text {
+                                        id: lText
+                                        anchors.centerIn: parent
+                                        text: modelData
+                                        color: "#aaa"
+                                        font.pixelSize: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Workspace detail
+                Column {
+                    width: parent.width
+                    spacing: 8
+                    visible: panel.picker.selectedItem?.type === "workspace"
+                    Text { text: "WORKSPACE"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                    Text { text: "Not yet tracked as a project."; color: "#888"; font.pixelSize: 14 }
+                    Text { text: "Press Tab to promote"; color: "#666"; font.pixelSize: 13 }
+                }
+
+                // Agent detail
+                Column {
+                    width: parent.width
+                    spacing: 16
+                    visible: panel.picker.selectedItem?.type === "agent"
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        Text { text: "SESSION"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Text {
+                            text: panel.picker.selectedItem?.sessionId || ""
+                            color: "#ccc"
+                            font.pixelSize: 13
+                            font.family: "monospace"
+                        }
+                    }
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        visible: !!(panel.picker.selectedItem?.currentTool)
+                        Text { text: "CURRENT TOOL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Text {
+                            text: panel.picker.selectedItem?.currentTool || ""
+                            color: panel.picker.phaseColor("running")
+                            font.pixelSize: 13
+                            font.family: "monospace"
+                        }
+                    }
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        visible: !!(panel.picker.selectedItem?.host)
+                        Text { text: "HOST"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Text { text: panel.picker.selectedItem?.host || ""; color: "#ccc"; font.pixelSize: 14 }
+                    }
+                    Column {
+                        width: parent.width
+                        spacing: 3
+                        visible: !!(panel.picker.selectedItem?.lastPrompt)
+                        Text { text: "LAST PROMPT"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
+                        Text {
+                            text: panel.picker.selectedItem?.lastPrompt || ""
+                            color: "#ccc"
+                            font.pixelSize: 13
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                            maximumLineCount: 3
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: actionsComp
+        PanelActions { picker: root }
+    }
+
+    /// Action list for the selected item. Pure display — keyboard is routed
+    /// through the root-level searchInput, which dispatches by topPanel.kind.
+    component PanelActions: Item {
+        id: panel
+        required property var picker
+        property bool compact: false
+
+        opacity: 0
+        Component.onCompleted: opacity = 1
+        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+        ListView {
+            id: actionListView
+            anchors.fill: parent
+            anchors.margins: 8
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            model: panel.picker.actionList
+            spacing: 2
+            currentIndex: panel.picker.actionIndex
+            onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+
+            delegate: Item {
+                id: aItem
+                required property var modelData
+                required property int index
+                width: actionListView.width
+                height: modelData.section ? secText.implicitHeight : 32
+
+                Text {
+                    id: secText
+                    visible: !!aItem.modelData.section
+                    text: aItem.modelData.section || ""
+                    color: "#666"
+                    font.pixelSize: 11
+                    font.weight: Font.Bold
+                    font.letterSpacing: 1
+                    leftPadding: 8
+                    topPadding: aItem.index > 0 ? 10 : 4
+                    bottomPadding: 2
+                }
+
+                Rectangle {
+                    visible: !aItem.modelData.section
+                    anchors.fill: parent
+                    radius: 8
+                    color: panel.picker.actionIndex === aItem.index
+                        ? Qt.rgba(1, 1, 1, 0.14)
+                        : aItemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                    Behavior on color { ColorAnimation { duration: 80 } }
+
+                    MouseArea {
+                        id: aItemMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: { panel.picker.actionIndex = aItem.index; panel.picker.executeAction() }
+                        onEntered: panel.picker.actionIndex = aItem.index
+                    }
+
+                    Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: 10
+                        spacing: 8
+
+                        Text {
+                            text: aItem.modelData.label || ""
+                            color: panel.picker.actionIndex === aItem.index ? "#fff" : "#bbb"
+                            font.pixelSize: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Item { width: 1; height: 1 }
+                        Text {
+                            visible: (aItem.modelData.key || "").length > 0
+                            text: aItem.modelData.key || ""
+                            color: "#555"
+                            font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: promoteComp
+        PanelPromote {
+            picker: root
+            wsId: root.topPanel.data ? (root.topPanel.data.wsId || 0) : 0
+            wsLabel: root.topPanel.data ? (root.topPanel.data.wsLabel || "") : ""
+            seedName: root.topPanel.data ? (root.topPanel.data.seedName || "") : ""
+        }
+    }
+
+    /// Promote-workspace wizard. Standalone — instantiated by the picker
+    /// when a `promote` panel is on top of the stack.
+    component PanelPromote: Item {
+        id: panel
+        required property var picker
+        required property int wsId
+        required property string wsLabel
+        property string seedName: ""
+        property var availableLaunchers: []
+        property var launchers: ({})
+
+        opacity: 0
+        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        Component.onCompleted: {
+            opacity = 1
+            nameInput.text = seedName
+            if (wsId > 0) {
+                ctxProc.command = ["/home/jay/.local/bin/agora", "workspace-context", String(wsId)]
+                ctxProc.running = true
+            }
+            nameInput.forceActiveFocus()
+        }
+
+        Process {
+            id: ctxProc
+            running: false
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        const ctx = JSON.parse(text.trim() || "{}")
+                        if (!nameInput.text) nameInput.text = ctx.suggested_name || ""
+                        if (!pathInput.text) pathInput.text = ctx.suggested_path || ""
+                        if (!hostInput.text) hostInput.text = ctx.host || ""
+                        panel.availableLaunchers = ctx.available_launchers || []
+                    } catch(e) { /* leave defaults */ }
+                }
+            }
+        }
+
+        function toggleLauncher(name) {
+            const next = Object.assign({}, panel.launchers)
+            next[name] = !next[name]
+            panel.launchers = next
+        }
+        function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
+
+        function submit() {
+            const name = nameInput.text.trim()
+            const path = pathInput.text.trim()
+            const host = hostInput.text.trim()
+            if (!name || !path) return
+            let cmd = "niri msg action focus-workspace " + shq(panel.wsLabel || String(panel.wsId))
+            cmd += " && /home/jay/.local/bin/agora promote --name " + shq(name)
+            if (host) cmd += " --host " + shq(host)
+            for (const n of panel.availableLaunchers) {
+                if (panel.launchers[n]) cmd += " --launcher " + shq(n)
+            }
+            if (name !== panel.wsLabel) cmd += " --rename-ws"
+            cmd += " " + shq(path)
+            Quickshell.execDetached(["sh", "-c", cmd])
+            panel.picker.visible = false
+        }
+        function cancel() { panel.picker.popPanel() }
+        function keyHandler(event) {
+            if (event.key === Qt.Key_Escape) {
+                cancel(); event.accepted = true
+            } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                       && (event.modifiers & Qt.ControlModifier)) {
+                submit(); event.accepted = true
+            }
+        }
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 20
+            anchors.topMargin: 24
+            spacing: 14
+
+            Text {
+                text: "PROMOTE → " + (panel.wsLabel || ("ws " + panel.wsId))
+                color: "#888"
+                font.pixelSize: 11
+                font.weight: Font.Bold
+                font.letterSpacing: 1
+            }
+
+            // NAME
+            Column {
+                width: parent.width
+                spacing: 4
+                Text { text: "PROJECT NAME"; color: "#555"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1 }
+                Rectangle {
+                    width: parent.width; height: 32; radius: 6
+                    color: nameInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    TextInput {
+                        id: nameInput
+                        anchors.fill: parent
+                        anchors.leftMargin: 10; anchors.rightMargin: 10
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: "#e0e0e0"; font.pixelSize: 14; clip: true
+                        selectByMouse: true; selectionColor: Qt.rgba(0.4, 0.7, 1, 0.4)
+                        KeyNavigation.tab: pathInput
+                        Keys.onPressed: event => panel.keyHandler(event)
+                    }
+                }
+            }
+
+            // PATH
+            Column {
+                width: parent.width
+                spacing: 4
+                Text { text: "ROOT PATH"; color: "#555"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1 }
+                Rectangle {
+                    width: parent.width; height: 32; radius: 6
+                    color: pathInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    TextInput {
+                        id: pathInput
+                        anchors.fill: parent
+                        anchors.leftMargin: 10; anchors.rightMargin: 10
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: "#e0e0e0"; font.pixelSize: 14; clip: true
+                        selectByMouse: true; selectionColor: Qt.rgba(0.4, 0.7, 1, 0.4)
+                        KeyNavigation.tab: hostInput
+                        KeyNavigation.backtab: nameInput
+                        Keys.onPressed: event => panel.keyHandler(event)
+                    }
+                }
+            }
+
+            // HOST
+            Column {
+                width: parent.width
+                spacing: 4
+                Text { text: "HOST  (empty = local)"; color: "#555"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1 }
+                Rectangle {
+                    width: parent.width; height: 32; radius: 6
+                    color: hostInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    TextInput {
+                        id: hostInput
+                        anchors.fill: parent
+                        anchors.leftMargin: 10; anchors.rightMargin: 10
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: "#e0e0e0"; font.pixelSize: 14; clip: true
+                        selectByMouse: true; selectionColor: Qt.rgba(0.4, 0.7, 1, 0.4)
+                        KeyNavigation.backtab: pathInput
+                        Keys.onPressed: event => panel.keyHandler(event)
+                    }
+                }
+            }
+
+            // LAUNCHERS
+            Column {
+                width: parent.width
+                spacing: 4
+                visible: panel.availableLaunchers.length > 0
+                Text { text: "LAUNCHERS"; color: "#555"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1 }
+                Flow {
+                    width: parent.width
+                    spacing: 6
+                    Repeater {
+                        model: panel.availableLaunchers
+                        Rectangle {
+                            required property string modelData
+                            property bool checked: !!panel.launchers[modelData]
+                            width: lblText.implicitWidth + 28; height: 26; radius: 13
+                            color: checked ? Qt.rgba(0.4, 0.7, 1, 0.25) : Qt.rgba(1, 1, 1, 0.06)
+                            border.color: checked ? Qt.rgba(0.4, 0.7, 1, 0.6) : "transparent"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 6
+                                Text {
+                                    text: parent.parent.checked ? "✓" : "○"
+                                    color: parent.parent.checked ? "#7EC8E3" : "#666"
+                                    font.pixelSize: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                Text {
+                                    id: lblText
+                                    text: parent.parent.modelData
+                                    color: parent.parent.checked ? "#e0e0e0" : "#aaa"
+                                    font.pixelSize: 13
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: panel.toggleLauncher(parent.modelData)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Submit / Cancel
+            Row {
+                anchors.right: parent.right
+                spacing: 8
+                Rectangle {
+                    width: cancelText.implicitWidth + 24; height: 32; radius: 6
+                    color: cancelMa.containsMouse ? Qt.rgba(1,1,1,0.08) : Qt.rgba(1,1,1,0.04)
+                    Text {
+                        id: cancelText
+                        anchors.centerIn: parent
+                        text: "Cancel  Esc"
+                        color: "#888"; font.pixelSize: 13
+                    }
+                    MouseArea {
+                        id: cancelMa
+                        anchors.fill: parent; hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: panel.cancel()
+                    }
+                }
+                Rectangle {
+                    property bool canSubmit: nameInput.text.trim().length > 0 && pathInput.text.trim().length > 0
+                    width: submitText.implicitWidth + 24; height: 32; radius: 6
+                    color: !canSubmit ? Qt.rgba(1,1,1,0.04)
+                          : submitMa.containsMouse ? Qt.rgba(0.4, 0.7, 1, 0.4)
+                          : Qt.rgba(0.4, 0.7, 1, 0.28)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Text {
+                        id: submitText
+                        anchors.centerIn: parent
+                        text: "Promote  Ctrl+↵"
+                        color: parent.canSubmit ? "#fff" : "#555"
+                        font.pixelSize: 13
+                        font.weight: Font.Medium
+                    }
+                    MouseArea {
+                        id: submitMa
+                        anchors.fill: parent; hoverEnabled: true
+                        cursorShape: parent.canSubmit ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: if (parent.canSubmit) panel.submit()
                     }
                 }
             }
