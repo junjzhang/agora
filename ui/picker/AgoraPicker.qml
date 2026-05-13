@@ -50,10 +50,8 @@ WlrLayershell {
 
     // ── Panel stack ──
     // The picker is a navigation stack. Tab pushes a new panel (drill in),
-    // Esc/Shift+Tab pops back. Only the top panel renders its body — the
-    // breadcrumb header above shows the path. actionMode and wizardMode are
-    // derived from the stack so the legacy bindings stay valid; new code
-    // should push/pop directly.
+    // Esc/Shift+Tab pops back. Slot Loaders dispatch on topPanel.kind, and
+    // the breadcrumb in the footer shows the path through the stack.
     //
     // Panel shape:
     //   { kind: "main" | "actions" | "promote",
@@ -79,7 +77,6 @@ WlrLayershell {
     }
 
     readonly property bool actionMode: topPanel.kind === "actions"
-    readonly property bool wizardMode: topPanel.kind === "promote"
 
     // ── Data ──
     property var projects: []
@@ -379,6 +376,18 @@ WlrLayershell {
         if (phase === "waiting_input") return "#EF5350"
         if (phase === "running") return "#66BB6A"
         return "#666"
+    }
+
+    /// Translucent variant of `phaseColor(phase)`. Avoids the 3×phaseColor
+    /// pattern that was sprinkled through the delegate code.
+    function phaseTint(phase, alpha) {
+        const c = phaseColor(phase)
+        return Qt.rgba(c.r || 0.5, c.g || 0.5, c.b || 0.5, alpha)
+    }
+
+    function modelTint(model, alpha) {
+        const c = modelColor(model)
+        return Qt.rgba(c.r || 0.5, c.g || 0.5, c.b || 0.5, alpha)
     }
 
     function phaseLabel(phase) {
@@ -878,11 +887,6 @@ WlrLayershell {
     // a `picker` ref to call into root state (push/pop, projects, …) and
     // their per-panel input via `data: ...`.
 
-    Component {
-        id: mainComp
-        PanelMain { picker: root }
-    }
-
     /// Root list panel — renders the projects/agents/workspaces list plus the
     /// selected-item detail. Search bar is owned by the root frame (always
     /// visible), so this panel is purely about content. `compact` collapses
@@ -928,6 +932,16 @@ WlrLayershell {
                                       : 42
                                 visible: true
 
+                                // Cache the derived phase/model lookups so we
+                                // don't call the helpers 3+ times per delegate.
+                                readonly property string _phase: modelData.phase || "idle"
+                                readonly property color  _phaseClr: panel.picker.phaseColor(_phase)
+                                readonly property string _agentPhase: modelData.agent ? modelData.agent.phase : ""
+                                readonly property color  _agentPhaseClr: _agentPhase
+                                    ? panel.picker.phaseColor(_agentPhase)
+                                    : (modelData.active ? "#4CAF50" : "#444")
+                                readonly property bool   _selected: panel.picker.selectedIndex === index
+
                                 Text {
                                     visible: listItem.modelData.type === "section"
                                     text: listItem.modelData.label || ""
@@ -949,7 +963,7 @@ WlrLayershell {
                                     visible: listItem.modelData.type === "project" || listItem.modelData.type === "agent" || listItem.modelData.type === "workspace"
                                     anchors.fill: parent
                                     radius: 8
-                                    color: panel.picker.selectedIndex === listItem.index
+                                    color: listItem._selected
                                         ? Qt.rgba(1, 1, 1, 0.14)
                                         : itemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
                                     Behavior on color { ColorAnimation { duration: 80 } }
@@ -974,13 +988,11 @@ WlrLayershell {
                                         Rectangle {
                                             width: 6; height: 6; radius: 3
                                             anchors.verticalCenter: parent.verticalCenter
-                                            color: listItem.modelData.agent
-                                                ? panel.picker.phaseColor(listItem.modelData.agent.phase)
-                                                : (listItem.modelData.active ? "#4CAF50" : "#444")
+                                            color: listItem._agentPhaseClr
                                         }
                                         Text {
                                             text: listItem.modelData.name || ""
-                                            color: panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc"
+                                            color: listItem._selected ? "#fff" : "#ccc"
                                             font.pixelSize: 15
                                             font.weight: Font.Medium
                                             anchors.verticalCenter: parent.verticalCenter
@@ -988,20 +1000,20 @@ WlrLayershell {
                                         }
                                         Item { width: 1; height: 1 }
                                         Rectangle {
-                                            visible: !panel.compact && (listItem.modelData.agent != null || (listItem.modelData.active || false))
+                                            visible: !panel.compact && (listItem._agentPhase !== "" || (listItem.modelData.active || false))
                                             anchors.verticalCenter: parent.verticalCenter
                                             width: projBadge.implicitWidth + 8; height: 16; radius: 8
-                                            color: listItem.modelData.agent
-                                                ? Qt.rgba(panel.picker.phaseColor(listItem.modelData.agent.phase).r || 0.5,
-                                                           panel.picker.phaseColor(listItem.modelData.agent.phase).g || 0.5,
-                                                           panel.picker.phaseColor(listItem.modelData.agent.phase).b || 0.5, 0.15)
+                                            color: listItem._agentPhase
+                                                ? panel.picker.phaseTint(listItem._agentPhase, 0.15)
                                                 : Qt.rgba(0.3, 0.69, 0.31, 0.12)
                                             Text {
                                                 id: projBadge
                                                 anchors.centerIn: parent
-                                                text: listItem.modelData.agent ? panel.picker.phaseLabel(listItem.modelData.agent.phase) : (listItem.modelData.active ? "active" : "")
+                                                text: listItem._agentPhase
+                                                    ? panel.picker.phaseLabel(listItem._agentPhase)
+                                                    : (listItem.modelData.active ? "active" : "")
                                                 font.pixelSize: 10
-                                                color: listItem.modelData.agent ? panel.picker.phaseColor(listItem.modelData.agent.phase) : "#66BB6A"
+                                                color: listItem._agentPhase ? listItem._agentPhaseClr : "#66BB6A"
                                             }
                                         }
                                     }
@@ -1020,24 +1032,22 @@ WlrLayershell {
                                             Rectangle {
                                                 width: 18; height: 18; radius: 4
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                color: Qt.rgba(panel.picker.phaseColor(listItem.modelData.phase || "idle").r || 0.4,
-                                                               panel.picker.phaseColor(listItem.modelData.phase || "idle").g || 0.4,
-                                                               panel.picker.phaseColor(listItem.modelData.phase || "idle").b || 0.4, 0.2)
+                                                color: panel.picker.phaseTint(listItem._phase, 0.2)
                                                 Text {
                                                     anchors.centerIn: parent
                                                     text: (listItem.modelData.cli || "claude") === "codex" ? "X" : "C"
                                                     font.pixelSize: 11
                                                     font.weight: Font.Bold
-                                                    color: panel.picker.phaseColor(listItem.modelData.phase || "idle")
+                                                    color: listItem._phaseClr
                                                 }
                                             }
                                             Text {
                                                 text: panel.picker.agentGroupBy === "status"
                                                     ? (listItem.modelData.project || "(no project)")
-                                                    : panel.picker.phaseLabel(listItem.modelData.phase || "idle")
+                                                    : panel.picker.phaseLabel(listItem._phase)
                                                 color: panel.picker.agentGroupBy === "project"
-                                                    ? panel.picker.phaseColor(listItem.modelData.phase || "idle")
-                                                    : (panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc")
+                                                    ? listItem._phaseClr
+                                                    : (listItem._selected ? "#fff" : "#ccc")
                                                 font.pixelSize: 15
                                                 font.weight: Font.Medium
                                                 elide: Text.ElideRight
@@ -1056,18 +1066,17 @@ WlrLayershell {
                                                 }
                                             }
                                             Rectangle {
+                                                readonly property color _modelClr: panel.picker.modelColor(listItem.modelData.model || "")
                                                 visible: !panel.compact && !!(listItem.modelData.model)
                                                 anchors.verticalCenter: parent.verticalCenter
                                                 width: itemModelLabel.implicitWidth + 8; height: 16; radius: 4
-                                                color: Qt.rgba(panel.picker.modelColor(listItem.modelData.model || "").r || 0.5,
-                                                               panel.picker.modelColor(listItem.modelData.model || "").g || 0.5,
-                                                               panel.picker.modelColor(listItem.modelData.model || "").b || 0.5, 0.12)
+                                                color: panel.picker.modelTint(listItem.modelData.model || "", 0.12)
                                                 Text {
                                                     id: itemModelLabel
                                                     anchors.centerIn: parent
                                                     text: panel.picker.shortModel(listItem.modelData.model || "")
                                                     font.pixelSize: 10
-                                                    color: panel.picker.modelColor(listItem.modelData.model || "")
+                                                    color: parent._modelClr
                                                 }
                                             }
                                             Rectangle {
@@ -1089,7 +1098,7 @@ WlrLayershell {
                                             text: listItem.modelData.currentTool
                                                 ? "▸ " + listItem.modelData.currentTool
                                                 : (listItem.modelData.lastPrompt || "")
-                                            color: listItem.modelData.currentTool ? panel.picker.phaseColor("running") : "#888"
+                                            color: listItem.modelData.currentTool ? "#66BB6A" : "#888"
                                             font.pixelSize: 13
                                             elide: Text.ElideRight
                                             maximumLineCount: 1
@@ -1112,7 +1121,7 @@ WlrLayershell {
                                         }
                                         Text {
                                             text: listItem.modelData.label || listItem.modelData.name || ""
-                                            color: panel.picker.selectedIndex === listItem.index ? "#fff" : "#ccc"
+                                            color: listItem._selected ? "#fff" : "#ccc"
                                             font.pixelSize: 15
                                             font.weight: Font.Medium
                                             anchors.verticalCenter: parent.verticalCenter
@@ -1190,7 +1199,9 @@ WlrLayershell {
                         Repeater {
                             model: panel.picker.selectedItem?.agents || []
                             Rectangle {
+                                id: agentRow
                                 required property var modelData
+                                readonly property color _phaseClr: panel.picker.phaseColor(modelData.phase)
                                 width: parent.width
                                 height: agentInner.implicitHeight + 6
                                 radius: 6
@@ -1207,11 +1218,11 @@ WlrLayershell {
                                         Rectangle {
                                             width: 5; height: 5; radius: 2.5
                                             anchors.verticalCenter: parent.verticalCenter
-                                            color: panel.picker.phaseColor(modelData.phase)
+                                            color: agentRow._phaseClr
                                         }
                                         Text {
-                                            text: panel.picker.phaseLabel(modelData.phase)
-                                            color: panel.picker.phaseColor(modelData.phase)
+                                            text: panel.picker.phaseLabel(agentRow.modelData.phase)
+                                            color: agentRow._phaseClr
                                             font.pixelSize: 13
                                         }
                                     }
@@ -1287,7 +1298,7 @@ WlrLayershell {
                         Text { text: "CURRENT TOOL"; color: "#555"; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 1 }
                         Text {
                             text: panel.picker.selectedItem?.currentTool || ""
-                            color: panel.picker.phaseColor("running")
+                            color: "#66BB6A"
                             font.pixelSize: 13
                             font.family: "monospace"
                         }
