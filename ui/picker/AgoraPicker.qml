@@ -30,6 +30,10 @@ WlrLayershell {
     readonly property string agora: "/home/jay/.local/bin/agora"
     readonly property string dms: "dms"
 
+    // Layout ratios.
+    readonly property real ratioMainCompact: 0.35  // main panel width when pushed down a level
+    readonly property real ratioListCol: 0.6       // main panel's list / detail split
+
     // Animation durations. One source of truth — change feel here.
     readonly property int animScrim: 200       // scrim color fade
     readonly property int animPanelOpen: 140   // main panel opacity + scale entrance
@@ -777,7 +781,7 @@ WlrLayershell {
                         picker: root
                         readonly property bool isTop: root.currentPanel.kind === "main"
                         compact: !isTop
-                        width: isTop ? parent.width : parent.width * 0.35
+                        width: isTop ? parent.width : parent.width * root.ratioMainCompact
                         Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                     }
@@ -1012,7 +1016,7 @@ WlrLayershell {
 
                     Rectangle {
                         id: listBg
-                        width: panel.compact ? parent.width : parent.width * 0.6
+                        width: panel.compact ? parent.width : parent.width * panel.picker.ratioListCol
                         Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.04)
