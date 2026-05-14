@@ -1023,7 +1023,7 @@ WlrLayershell {
                                 required property int index
                                 width: mainListView.width
                                 height: modelData.type === "section" ? 32
-                                      : modelData.type === "agent" ? (modelData.lastPrompt ? 52 : 42)
+                                      : modelData.type === "agent" ? ((modelData.currentTool || modelData.lastPrompt) ? 52 : 42)
                                       : 42
                                 visible: true
 
