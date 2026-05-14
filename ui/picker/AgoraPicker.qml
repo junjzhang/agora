@@ -489,6 +489,7 @@ WlrLayershell {
             rows.push({
                 label: action.label || actionId,
                 key: action.key || "",
+                async: true,
                 run: () => root.runDaemonAction("project", targetId, actionId)
             })
         }
@@ -496,7 +497,32 @@ WlrLayershell {
     }
 
     function runDaemonAction(target, id, actionId) {
-        Quickshell.execDetached([root.agora, "run-action", target, id, actionId])
+        root.runAgora(["run-action", target, id, actionId])
+    }
+
+    // All agora invocations that can fail meaningfully (daemon rejects /
+    // unknown id / etc.) go through this. On non-zero exit, stderr is
+    // toasted; on success, the picker closes. Callers using this must not
+    // eagerly set `visible = false` themselves (use `async: true` action rows).
+    function runAgora(args) {
+        if (agoraProc.running) return  // ignore mashed second invocation
+        agoraProc.command = [root.agora].concat(args)
+        agoraProc.running = true
+    }
+
+    Process {
+        id: agoraProc
+        running: false
+        stdout: StdioCollector { id: agoraOut }
+        stderr: StdioCollector { id: agoraErr }
+        onExited: function(exitCode, exitStatus) {
+            if (exitCode === 0) {
+                root.visible = false
+            } else {
+                const raw = (agoraErr.text || agoraOut.text || "agora failed").trim()
+                root.reportError(raw.replace(/^Error:\s*daemon:\s*/, ""))
+            }
+        }
     }
 
     function getActions(item) {
@@ -514,10 +540,10 @@ WlrLayershell {
         if (item.type === "agent") {
             const actions = [
                 { section: "NAVIGATE" },
-                { label: "Focus terminal", key: "↵", run: () => Quickshell.execDetached([root.agora, "focus-agent", item.sessionId]) },
+                { label: "Focus terminal", key: "↵", async: true, run: () => root.runAgora(["focus-agent", item.sessionId]) },
             ]
             if (item.project) {
-                actions.push({ label: "Open project workspace", key: "", run: () => Quickshell.execDetached([root.agora, "open", item.project]) })
+                actions.push({ label: "Open project workspace", key: "", async: true, run: () => root.runAgora(["open", item.project]) })
             }
             actions.push({ section: "INFO" })
             actions.push({ label: "Copy session ID", key: "⌥C", run: () => Quickshell.execDetached([root.dms, "cl", "copy", item.sessionId]) })
@@ -551,13 +577,12 @@ WlrLayershell {
     function executeItem(item) {
         if (!item || !isSelectable(item)) return
         if (item.type === "project") {
+            // runDaemonAction → runAgora → close on Process exit
             root.runDaemonAction("project", item.id, "builtin:open")
-            root.visible = false
             return
         }
         if (item.type === "agent") {
-            Quickshell.execDetached([root.agora, "focus-agent", item.sessionId])
-            root.visible = false
+            root.runAgora(["focus-agent", item.sessionId])
             return
         }
         const actions = getActions(item)
@@ -572,7 +597,8 @@ WlrLayershell {
         if (actionIndex >= 0 && actionIndex < actionList.length && actionList[actionIndex].run) {
             const act = actionList[actionIndex]
             act.run()
-            if (!act.keepOpen) root.visible = false
+            // async actions close the picker from agoraProc.onExited on success.
+            if (!act.keepOpen && !act.async) root.visible = false
         }
     }
 
