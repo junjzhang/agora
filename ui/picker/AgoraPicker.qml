@@ -35,7 +35,6 @@ WlrLayershell {
     readonly property int animPanelOpen: 140   // main panel opacity + scale entrance
     readonly property int animColResize: 150   // column width / toast height
     readonly property int animPanelFadeIn: 110 // sub-panel opacity from 0→1 on creation
-    readonly property int animDetailFade: 120  // detail column opacity on compact toggle
     readonly property int animToastFade: 220   // toast opacity
     readonly property int animTint: 100        // input focus tint, breadcrumb, launchers
     readonly property int animHover: 80        // list-item hover
@@ -1257,8 +1256,6 @@ WlrLayershell {
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.01)
                         clip: true
-                        opacity: panel.compact ? 0 : 1
-                        Behavior on opacity { NumberAnimation { duration: root.animDetailFade; easing.type: Easing.OutCubic } }
 
                         Loader {
                             anchors.fill: parent
