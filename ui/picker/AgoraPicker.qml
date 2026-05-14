@@ -1620,7 +1620,9 @@ WlrLayershell {
             next[name] = !next[name]
             panel.launchers = next
         }
-        function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
+
+        // Built once in submit() and consumed by promoteProc after focus succeeds.
+        property var pendingPromoteArgs: []
 
         function submit() {
             const name = nameInput.text.trim()
@@ -1631,32 +1633,47 @@ WlrLayershell {
                 panel.picker.reportError("Project '" + name + "' already exists. Pick a different name.")
                 return
             }
-            let cmd = "niri msg action focus-workspace " + shq(panel.wsRef)
-            cmd += " && " + panel.picker.agora + " promote --name " + shq(name)
-            if (host) cmd += " --host " + shq(host)
+            const args = ["promote", "--name", name]
+            if (host) { args.push("--host"); args.push(host) }
             for (const n of panel.availableLaunchers) {
-                if (panel.launchers[n]) cmd += " --launcher " + shq(n)
+                if (panel.launchers[n]) { args.push("--launcher"); args.push(n) }
             }
             // Rename whenever the new project name differs from the current
             // ws name (also covers the case where the ws was unnamed).
-            if (name !== panel.wsName) cmd += " --rename-ws"
-            cmd += " " + shq(path)
+            if (name !== panel.wsName) args.push("--rename-ws")
+            args.push(path)
+            panel.pendingPromoteArgs = args
             panel.submitting = true
-            submitProc.command = ["sh", "-c", cmd + "; exit $?"]
-            submitProc.running = true
+            focusProc.command = ["niri", "msg", "action", "focus-workspace", panel.wsRef]
+            focusProc.running = true
         }
 
         Process {
-            id: submitProc
+            id: focusProc
             running: false
-            stdout: StdioCollector { id: submitOut }
-            stderr: StdioCollector { id: submitErr }
+            stderr: StdioCollector { id: focusErr }
+            onExited: function(exitCode, exitStatus) {
+                if (exitCode !== 0) {
+                    panel.submitting = false
+                    panel.picker.reportError((focusErr.text || "niri focus-workspace failed").trim())
+                    return
+                }
+                promoteProc.command = [panel.picker.agora].concat(panel.pendingPromoteArgs)
+                promoteProc.running = true
+            }
+        }
+
+        Process {
+            id: promoteProc
+            running: false
+            stdout: StdioCollector { id: promoteOut }
+            stderr: StdioCollector { id: promoteErr }
             onExited: function(exitCode, exitStatus) {
                 panel.submitting = false
                 if (exitCode === 0) {
                     panel.picker.visible = false
                 } else {
-                    const raw = (submitErr.text || submitOut.text || "promote failed").trim()
+                    const raw = (promoteErr.text || promoteOut.text || "promote failed").trim()
                     panel.picker.reportError(raw.replace(/^Error:\s*daemon:\s*/, ""))
                 }
             }
