@@ -45,6 +45,7 @@ WlrLayershell {
             // the QML tree is small while the picker is idle. Saves work for
             // the compositor when other overlays (dms spotlight, etc.) animate.
             panelStack = [{ kind: "main", title: "" }]
+            clearToast()
         }
     }
 
@@ -90,7 +91,39 @@ WlrLayershell {
     // Search box text lives at root so it survives PanelMain's Loader being
     // destroyed/recreated when the panel goes from full → compact and back.
     property string searchText: ""
-    onSearchTextChanged: rebuildItems()
+    onSearchTextChanged: {
+        rebuildItems()
+        if (toastKind === "error") clearToast()
+    }
+
+    // ── Toast: cross-panel error/info banner ──
+    // info  → auto-dismiss after 4s.
+    // error → stays until next user action / manual dismiss / picker close.
+    property string toastText: ""
+    property string toastKind: "info"
+    property bool   toastShown: false
+
+    function reportInfo(msg) {
+        toastText = msg
+        toastKind = "info"
+        toastShown = true
+        toastAutoClear.restart()
+    }
+    function reportError(msg) {
+        toastText = msg
+        toastKind = "error"
+        toastShown = true
+        toastAutoClear.stop()
+    }
+    function clearToast() { toastShown = false }
+
+    Timer {
+        id: toastAutoClear
+        interval: 4000
+        onTriggered: root.clearToast()
+    }
+    // Switching panels also clears a sticky error — the user moved on.
+    onPanelStackChanged: if (toastKind === "error") clearToast()
 
     property var selectedItem: filteredItems.length > 0 && selectedIndex < filteredItems.length
         ? filteredItems[selectedIndex] : null
@@ -102,7 +135,11 @@ WlrLayershell {
             title: "Promote",
             data: {
                 wsId: item.wsId || 0,
-                wsLabel: item.label || item.name || "",
+                // What we pass to `niri msg action focus-workspace`. niri
+                // takes either a name (only set when the ws was explicitly
+                // named) or an idx string — so prefer name, fall back to idx.
+                wsRef: item.name || String(item.idx || ""),
+                wsName: item.name || "",
                 seedName: item.name || "",
             },
         })
@@ -582,8 +619,8 @@ WlrLayershell {
 
         opacity: root.visible ? 1 : 0
         scale: root.visible ? 1 : 0.95
-        Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-        Behavior on scale { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
         Column {
             anchors.fill: parent
@@ -679,7 +716,7 @@ WlrLayershell {
             // breadcrumb in the footer remains the source of truth.
             Item {
                 width: parent.width
-                height: parent.height - 48 - 1 - 40 - 1
+                height: parent.height - 48 - 1 - toastBar.height - 40 - 1
 
                 Row {
                     anchors.fill: parent
@@ -698,7 +735,7 @@ WlrLayershell {
                         compact: !isTop && isPrev
                         visible: isTop || isPrev
                         width: isTop ? parent.width : (isPrev ? parent.width * 0.35 : 0)
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                     }
 
@@ -719,7 +756,7 @@ WlrLayershell {
                         visible: root.panelStack.length >= 2 && prevKind !== "main"
                         active: visible
                         width: visible ? parent.width * 0.35 : 0
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                         sourceComponent: {
                             switch (prevKind) {
@@ -749,7 +786,7 @@ WlrLayershell {
                         width: visible
                             ? parent.width - mainPanel.width - prevSlot.width - dividerCount
                             : 0
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                         sourceComponent: {
                             switch (topKind) {
@@ -763,6 +800,64 @@ WlrLayershell {
                 }
             }
 
+
+            // ── Toast banner ──
+            // Cross-panel error/info display. Slides in above the footer.
+            // info auto-dismisses; error stays until next user action.
+            Rectangle {
+                id: toastBar
+                width: parent.width
+                height: root.toastShown ? 32 : 0
+                Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                opacity: root.toastShown ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                clip: true
+                color: root.toastKind === "error"
+                    ? Qt.rgba(0.95, 0.3, 0.3, 0.18)
+                    : Qt.rgba(0.4, 0.7, 1, 0.15)
+
+                Row {
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 8
+                    spacing: 8
+                    Text {
+                        text: root.toastKind === "error" ? "⚠" : "ℹ"
+                        color: root.toastKind === "error" ? "#FFB4B4" : "#9ECEFF"
+                        font.pixelSize: 13
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                        width: toastBar.width - 14 - 8 - 14 - 24
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.toastText
+                        color: root.toastKind === "error" ? "#FFB4B4" : "#9ECEFF"
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
+                }
+                Rectangle {
+                    width: 20; height: 20; radius: 4
+                    anchors.right: parent.right
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: dismissMa.containsMouse ? Qt.rgba(1,1,1,0.1) : "transparent"
+                    visible: root.toastShown
+                    Text {
+                        anchors.centerIn: parent
+                        text: "×"
+                        color: "#aaa"
+                        font.pixelSize: 14
+                    }
+                    MouseArea {
+                        id: dismissMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.clearToast()
+                    }
+                }
+            }
 
             // ── Bottom Divider ──
             Rectangle { width: parent.width; height: 1; color: Qt.rgba(1,1,1,0.06) }
@@ -907,7 +1002,7 @@ WlrLayershell {
                     Rectangle {
                         id: listBg
                         width: panel.compact ? parent.width : parent.width * 0.6
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.04)
 
@@ -1135,7 +1230,7 @@ WlrLayershell {
                     // ── Detail panel (collapses to 0 width when compact) ──
                     Rectangle {
                         width: panel.compact ? 0 : 1
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1,1,1,0.06)
                         clip: true
@@ -1143,12 +1238,12 @@ WlrLayershell {
                     Rectangle {
                         id: detailBg
                         width: panel.compact ? 0 : (parent.width - listBg.width - 1)
-                        Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.01)
                         clip: true
                         opacity: panel.compact ? 0 : 1
-                        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
 
                         Loader {
                             anchors.fill: parent
@@ -1344,7 +1439,7 @@ WlrLayershell {
 
         opacity: 0
         Component.onCompleted: opacity = 1
-        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
 
         ListView {
             id: actionListView
@@ -1426,7 +1521,8 @@ WlrLayershell {
         PanelPromote {
             picker: root
             wsId: root.topPanel.data ? (root.topPanel.data.wsId || 0) : 0
-            wsLabel: root.topPanel.data ? (root.topPanel.data.wsLabel || "") : ""
+            wsRef: root.topPanel.data ? (root.topPanel.data.wsRef || "") : ""
+            wsName: root.topPanel.data ? (root.topPanel.data.wsName || "") : ""
             seedName: root.topPanel.data ? (root.topPanel.data.seedName || "") : ""
         }
     }
@@ -1437,13 +1533,24 @@ WlrLayershell {
         id: panel
         required property var picker
         required property int wsId
-        required property string wsLabel
+        required property string wsRef    // arg for `niri msg action focus-workspace`
+        required property string wsName   // current ws name in niri (empty for unnamed)
         property string seedName: ""
         property var availableLaunchers: []
         property var launchers: ({})
+        property bool submitting: false
+        // Project id conflicts → daemon will reject. Highlight in the form.
+        readonly property bool nameConflicts: {
+            const n = nameInput ? nameInput.text.trim() : ""
+            if (!n) return false
+            for (const p of panel.picker.projects || []) {
+                if (p.id === n) return true
+            }
+            return false
+        }
 
         opacity: 0
-        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
         Component.onCompleted: {
             opacity = 1
             nameInput.text = seedName
@@ -1482,23 +1589,45 @@ WlrLayershell {
             const path = pathInput.text.trim()
             const host = hostInput.text.trim()
             if (!name || !path) return
-            let cmd = "niri msg action focus-workspace " + shq(panel.wsLabel || String(panel.wsId))
+            if (panel.nameConflicts) {
+                panel.picker.reportError("Project '" + name + "' already exists. Pick a different name.")
+                return
+            }
+            let cmd = "niri msg action focus-workspace " + shq(panel.wsRef)
             cmd += " && /home/jay/.local/bin/agora promote --name " + shq(name)
             if (host) cmd += " --host " + shq(host)
             for (const n of panel.availableLaunchers) {
                 if (panel.launchers[n]) cmd += " --launcher " + shq(n)
             }
-            if (name !== panel.wsLabel) cmd += " --rename-ws"
+            // Rename whenever the new project name differs from the current
+            // ws name (also covers the case where the ws was unnamed).
+            if (name !== panel.wsName) cmd += " --rename-ws"
             cmd += " " + shq(path)
-            Quickshell.execDetached(["sh", "-c", cmd])
-            panel.picker.visible = false
+            panel.submitting = true
+            submitProc.command = ["sh", "-c", cmd + "; exit $?"]
+            submitProc.running = true
+        }
+
+        Process {
+            id: submitProc
+            running: false
+            stdout: StdioCollector { id: submitOut }
+            stderr: StdioCollector { id: submitErr }
+            onExited: function(exitCode, exitStatus) {
+                panel.submitting = false
+                if (exitCode === 0) {
+                    panel.picker.visible = false
+                } else {
+                    const raw = (submitErr.text || submitOut.text || "promote failed").trim()
+                    panel.picker.reportError(raw.replace(/^Error:\s*daemon:\s*/, ""))
+                }
+            }
         }
         function cancel() { panel.picker.popPanel() }
         function keyHandler(event) {
             if (event.key === Qt.Key_Escape) {
                 cancel(); event.accepted = true
-            } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                       && (event.modifiers & Qt.ControlModifier)) {
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 submit(); event.accepted = true
             }
         }
@@ -1510,7 +1639,7 @@ WlrLayershell {
             spacing: 14
 
             Text {
-                text: "PROMOTE → " + (panel.wsLabel || ("ws " + panel.wsId))
+                text: "PROMOTE → " + (panel.wsName || panel.wsRef || ("ws " + panel.wsId))
                 color: "#888"
                 font.pixelSize: 11
                 font.weight: Font.Bold
@@ -1651,7 +1780,10 @@ WlrLayershell {
                     }
                 }
                 Rectangle {
-                    property bool canSubmit: nameInput.text.trim().length > 0 && pathInput.text.trim().length > 0
+                    property bool canSubmit: nameInput.text.trim().length > 0
+                        && pathInput.text.trim().length > 0
+                        && !panel.nameConflicts
+                        && !panel.submitting
                     width: submitText.implicitWidth + 24; height: 32; radius: 6
                     color: !canSubmit ? Qt.rgba(1,1,1,0.04)
                           : submitMa.containsMouse ? Qt.rgba(0.4, 0.7, 1, 0.4)
@@ -1660,7 +1792,7 @@ WlrLayershell {
                     Text {
                         id: submitText
                         anchors.centerIn: parent
-                        text: "Promote  Ctrl+↵"
+                        text: panel.submitting ? "…" : "Promote  ↵"
                         color: parent.canSubmit ? "#fff" : "#555"
                         font.pixelSize: 13
                         font.weight: Font.Medium
