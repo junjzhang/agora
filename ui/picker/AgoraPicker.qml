@@ -19,7 +19,7 @@ WlrLayershell {
     anchors.right: true
 
     color: visible ? Qt.rgba(0, 0, 0, 0.45) : "transparent"
-    Behavior on color { ColorAnimation { duration: 200 } }
+    Behavior on color { ColorAnimation { duration: root.animScrim } }
 
     visible: false
     property string mode: "agents"
@@ -29,6 +29,16 @@ WlrLayershell {
     // these from env. If the user installs elsewhere, override here.
     readonly property string agora: "/home/jay/.local/bin/agora"
     readonly property string dms: "dms"
+
+    // Animation durations. One source of truth — change feel here.
+    readonly property int animScrim: 200       // scrim color fade
+    readonly property int animPanelOpen: 140   // main panel opacity + scale entrance
+    readonly property int animColResize: 150   // column width / toast height
+    readonly property int animPanelFadeIn: 110 // sub-panel opacity from 0→1 on creation
+    readonly property int animDetailFade: 120  // detail column opacity on compact toggle
+    readonly property int animToastFade: 220   // toast opacity
+    readonly property int animTint: 100        // input focus tint, breadcrumb, launchers
+    readonly property int animHover: 80        // list-item hover
 
     function toggle() { visible = !visible }
     function toggleMode(m) {
@@ -624,8 +634,8 @@ WlrLayershell {
 
         opacity: root.visible ? 1 : 0
         scale: root.visible ? 1 : 0.95
-        Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: root.animPanelOpen; easing.type: Easing.OutCubic } }
+        Behavior on scale { NumberAnimation { duration: root.animPanelOpen; easing.type: Easing.OutCubic } }
 
         Column {
             anchors.fill: parent
@@ -740,7 +750,7 @@ WlrLayershell {
                         compact: !isTop && isPrev
                         visible: isTop || isPrev
                         width: isTop ? parent.width : (isPrev ? parent.width * 0.35 : 0)
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                     }
 
@@ -761,7 +771,7 @@ WlrLayershell {
                         visible: root.panelStack.length >= 2 && prevKind !== "main"
                         active: visible
                         width: visible ? parent.width * 0.35 : 0
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         sourceComponent: {
                             switch (prevKind) {
@@ -791,7 +801,7 @@ WlrLayershell {
                         width: visible
                             ? parent.width - mainPanel.width - prevSlot.width - dividerCount
                             : 0
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         sourceComponent: {
                             switch (topKind) {
@@ -813,9 +823,9 @@ WlrLayershell {
                 id: toastBar
                 width: parent.width
                 height: root.toastShown ? 32 : 0
-                Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                Behavior on height { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                 opacity: root.toastShown ? 1 : 0
-                Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                Behavior on opacity { NumberAnimation { duration: root.animToastFade; easing.type: Easing.OutCubic } }
                 clip: true
                 color: root.toastKind === "error"
                     ? Qt.rgba(0.95, 0.3, 0.3, 0.18)
@@ -904,7 +914,7 @@ WlrLayershell {
                                 color: isTop
                                     ? Qt.rgba(0.4, 0.7, 1, 0.22)
                                     : bcMa.containsMouse ? Qt.rgba(1,1,1,0.08) : Qt.rgba(1,1,1,0.03)
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: root.animTint } }
                                 Text {
                                     id: bcText
                                     anchors.centerIn: parent
@@ -1007,7 +1017,7 @@ WlrLayershell {
                     Rectangle {
                         id: listBg
                         width: panel.compact ? parent.width : parent.width * 0.6
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.04)
 
@@ -1066,7 +1076,7 @@ WlrLayershell {
                                     color: listItem._selected
                                         ? Qt.rgba(1, 1, 1, 0.14)
                                         : itemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-                                    Behavior on color { ColorAnimation { duration: 80 } }
+                                    Behavior on color { ColorAnimation { duration: root.animHover } }
 
                                     MouseArea {
                                         id: itemMa
@@ -1235,7 +1245,7 @@ WlrLayershell {
                     // ── Detail panel (collapses to 0 width when compact) ──
                     Rectangle {
                         width: panel.compact ? 0 : 1
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1,1,1,0.06)
                         clip: true
@@ -1243,12 +1253,12 @@ WlrLayershell {
                     Rectangle {
                         id: detailBg
                         width: panel.compact ? 0 : (parent.width - listBg.width - 1)
-                        Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.01)
                         clip: true
                         opacity: panel.compact ? 0 : 1
-                        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                        Behavior on opacity { NumberAnimation { duration: root.animDetailFade; easing.type: Easing.OutCubic } }
 
                         Loader {
                             anchors.fill: parent
@@ -1444,7 +1454,7 @@ WlrLayershell {
 
         opacity: 0
         Component.onCompleted: opacity = 1
-        Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: root.animPanelFadeIn; easing.type: Easing.OutCubic } }
 
         ListView {
             id: actionListView
@@ -1484,7 +1494,7 @@ WlrLayershell {
                     color: panel.picker.actionIndex === aItem.index
                         ? Qt.rgba(1, 1, 1, 0.14)
                         : aItemMa.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-                    Behavior on color { ColorAnimation { duration: 80 } }
+                    Behavior on color { ColorAnimation { duration: root.animHover } }
 
                     MouseArea {
                         id: aItemMa
@@ -1555,7 +1565,7 @@ WlrLayershell {
         }
 
         opacity: 0
-        Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: root.animPanelFadeIn; easing.type: Easing.OutCubic } }
         Component.onCompleted: {
             opacity = 1
             nameInput.text = seedName
@@ -1659,7 +1669,7 @@ WlrLayershell {
                 Rectangle {
                     width: parent.width; height: 32; radius: 6
                     color: nameInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: root.animTint } }
                     TextInput {
                         id: nameInput
                         anchors.fill: parent
@@ -1681,7 +1691,7 @@ WlrLayershell {
                 Rectangle {
                     width: parent.width; height: 32; radius: 6
                     color: pathInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: root.animTint } }
                     TextInput {
                         id: pathInput
                         anchors.fill: parent
@@ -1704,7 +1714,7 @@ WlrLayershell {
                 Rectangle {
                     width: parent.width; height: 32; radius: 6
                     color: hostInput.activeFocus ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.05)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: root.animTint } }
                     TextInput {
                         id: hostInput
                         anchors.fill: parent
@@ -1736,7 +1746,7 @@ WlrLayershell {
                             color: checked ? Qt.rgba(0.4, 0.7, 1, 0.25) : Qt.rgba(1, 1, 1, 0.06)
                             border.color: checked ? Qt.rgba(0.4, 0.7, 1, 0.6) : "transparent"
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: root.animTint } }
                             Row {
                                 anchors.centerIn: parent
                                 spacing: 6
@@ -1793,7 +1803,7 @@ WlrLayershell {
                     color: !canSubmit ? Qt.rgba(1,1,1,0.04)
                           : submitMa.containsMouse ? Qt.rgba(0.4, 0.7, 1, 0.4)
                           : Qt.rgba(0.4, 0.7, 1, 0.28)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: root.animTint } }
                     Text {
                         id: submitText
                         anchors.centerIn: parent
