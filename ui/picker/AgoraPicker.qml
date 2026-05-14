@@ -51,47 +51,49 @@ WlrLayershell {
             if (_blurRegion) root.BackgroundEffect.blurRegion = _blurRegion
             searchText = ""
             selectedIndex = 0
-            panelStack = [{ kind: "main", title: root.mode === "agents" ? "Agents" : "Projects" }]
+            currentPanel = { kind: "main", title: root.mode === "agents" ? "Agents" : "Projects" }
+            parentPanel = null
             refreshData()
             Qt.callLater(() => { if (searchInput) searchInput.forceActiveFocus() })
         } else {
-            // Collapse to depth 1 so prevSlot/topSlot Loaders deactivate and
-            // the QML tree is small while the picker is idle. Saves work for
+            // Collapse to main so the top-slot Loader deactivates and the
+            // QML tree is small while the picker is idle. Saves work for
             // the compositor when other overlays (dms spotlight, etc.) animate.
-            panelStack = [{ kind: "main", title: "" }]
+            currentPanel = { kind: "main", title: "" }
+            parentPanel = null
             clearToast()
         }
     }
 
-    // ── Panel stack ──
-    // The picker is a navigation stack. Tab pushes a new panel (drill in),
-    // Esc/Shift+Tab pops back. Slot Loaders dispatch on topPanel.kind, and
-    // the breadcrumb in the footer shows the path through the stack.
+    // ── Panel navigation ──
+    // Two slots: main is always present; one optional panel (actions or
+    // promote) sits on top. Slot Loaders dispatch on currentPanel.kind, and
+    // the breadcrumb in the footer shows main › current when nested.
     //
     // Panel shape:
     //   { kind: "main" | "actions" | "promote",
     //     title: string,           // breadcrumb chip label
     //     data: { ... } }          // panel-specific payload
-    property var panelStack: [{ kind: "main", title: "" }]
-    readonly property var topPanel: panelStack[panelStack.length - 1]
+    property var currentPanel: ({ kind: "main", title: "" })
+    property var parentPanel: null
+    // Compatibility alias: existing inline components and bindings read
+    // `topPanel.kind` / `topPanel.data`. Cheaper than renaming everywhere.
+    readonly property var topPanel: currentPanel
 
     function pushPanel(p) {
-        panelStack = panelStack.concat([p])
+        parentPanel = currentPanel
+        currentPanel = p
     }
     function popPanel() {
-        if (panelStack.length <= 1) { root.visible = false; return }
-        panelStack = panelStack.slice(0, -1)
+        if (!parentPanel) { root.visible = false; return }
+        currentPanel = parentPanel
+        parentPanel = null
         // Return focus to the always-visible search bar (a deeper panel may
         // have stolen it, e.g. PanelPromote's name input).
         Qt.callLater(() => { if (searchInput) searchInput.forceActiveFocus() })
     }
-    function popToDepth(depth) {
-        if (depth < 1) depth = 1
-        if (depth >= panelStack.length) return
-        panelStack = panelStack.slice(0, depth)
-    }
 
-    readonly property bool actionMode: topPanel.kind === "actions"
+    readonly property bool actionMode: currentPanel.kind === "actions"
 
     // ── Data ──
     property var projects: []
@@ -137,13 +139,19 @@ WlrLayershell {
         onTriggered: root.clearToast()
     }
     // Switching panels also clears a sticky error — the user moved on.
-    onPanelStackChanged: if (toastKind === "error") clearToast()
+    onCurrentPanelChanged: if (toastKind === "error") clearToast()
 
     property var selectedItem: filteredItems.length > 0 && selectedIndex < filteredItems.length
         ? filteredItems[selectedIndex] : null
 
     // Entry point used by PanelMain's workspace action.
     function openPromoteWizard(item) {
+        // When invoked from the actions panel, replace it (don't stack a
+        // third layer). Depth stays at 2: main → promote.
+        if (currentPanel.kind === "actions") {
+            currentPanel = parentPanel
+            parentPanel = null
+        }
         pushPanel({
             kind: "promote",
             title: "Promote",
@@ -750,10 +758,8 @@ WlrLayershell {
             Rectangle { width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.06) }
 
             // ── Body: panel slots ──
-            // Two-column stack view. Left = panelStack[depth-2] in compact
-            // mode (visible only when depth >= 2); right = top panel in full
-            // mode. Beyond depth 2 the deeper ancestors are not rendered;
-            // breadcrumb in the footer remains the source of truth.
+            // Two-column view. Main panel is always present (compact when
+            // pushed below another). Top slot holds actions/promote.
             Item {
                 width: parent.width
                 height: parent.height - 48 - 1 - toastBar.height - 40 - 1
@@ -769,63 +775,27 @@ WlrLayershell {
                     PanelMain {
                         id: mainPanel
                         picker: root
-                        readonly property int prevIdx: root.panelStack.length - 2
-                        readonly property bool isTop: root.topPanel.kind === "main"
-                        readonly property bool isPrev: prevIdx >= 0 && root.panelStack[prevIdx].kind === "main"
-                        compact: !isTop && isPrev
-                        visible: isTop || isPrev
-                        width: isTop ? parent.width : (isPrev ? parent.width * 0.35 : 0)
+                        readonly property bool isTop: root.currentPanel.kind === "main"
+                        compact: !isTop
+                        width: isTop ? parent.width : parent.width * 0.35
                         Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                     }
 
                     Rectangle {
-                        visible: mainPanel.visible && (prevSlot.visible || topSlot.visible)
+                        visible: topSlot.visible
                         width: 1
                         height: parent.height
                         color: Qt.rgba(1, 1, 1, 0.06)
                     }
 
-                    // Previous-layer slot — only used when prev is *not* main
-                    // (e.g. depth=3 with prev=actions). When prev==main, the
-                    // sibling PanelMain already handles it.
-                    Loader {
-                        id: prevSlot
-                        readonly property int prevIdx: root.panelStack.length - 2
-                        readonly property string prevKind: prevIdx >= 0 ? root.panelStack[prevIdx].kind : ""
-                        visible: root.panelStack.length >= 2 && prevKind !== "main"
-                        active: visible
-                        width: visible ? parent.width * 0.35 : 0
-                        Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
-                        height: parent.height
-                        sourceComponent: {
-                            switch (prevKind) {
-                                case "actions": return actionsComp
-                                case "promote": return promoteComp
-                            }
-                            return null
-                        }
-                        onLoaded: if (item && item.hasOwnProperty("compact")) item.compact = true
-                    }
-
-                    Rectangle {
-                        visible: prevSlot.visible && topSlot.visible
-                        width: 1
-                        height: parent.height
-                        color: Qt.rgba(1, 1, 1, 0.06)
-                    }
-
-                    // Top-layer slot — for everything but main on top.
+                    // Top-layer slot — for actions / promote.
                     Loader {
                         id: topSlot
-                        readonly property string topKind: root.topPanel.kind
+                        readonly property string topKind: root.currentPanel.kind
                         visible: topKind !== "main"
                         active: visible
-                        readonly property int dividerCount:
-                            (mainPanel.visible ? 1 : 0) + (prevSlot.visible ? 1 : 0)
-                        width: visible
-                            ? parent.width - mainPanel.width - prevSlot.width - dividerCount
-                            : 0
+                        width: visible ? parent.width - mainPanel.width - 1 : 0
                         Behavior on width { NumberAnimation { duration: root.animColResize; easing.type: Easing.OutCubic } }
                         height: parent.height
                         sourceComponent: {
@@ -917,7 +887,8 @@ WlrLayershell {
                     anchors.leftMargin: 16
                     spacing: 4
                     Repeater {
-                        model: root.panelStack
+                        // [parent, current] when nested; [current] otherwise.
+                        model: root.parentPanel ? [root.parentPanel, root.currentPanel] : [root.currentPanel]
                         Row {
                             required property var modelData
                             required property int index
@@ -931,7 +902,7 @@ WlrLayershell {
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                             Rectangle {
-                                readonly property bool isTop: parent.index === root.panelStack.length - 1
+                                readonly property bool isTop: parent.index === (root.parentPanel ? 1 : 0)
                                 radius: 5
                                 height: 20
                                 width: bcText.implicitWidth + 14
@@ -954,7 +925,7 @@ WlrLayershell {
                                     hoverEnabled: true
                                     cursorShape: parent.isTop ? Qt.ArrowCursor : Qt.PointingHandCursor
                                     onClicked: {
-                                        if (!parent.isTop) root.popToDepth(parent.parent.index + 1)
+                                        if (!parent.isTop) root.popPanel()
                                     }
                                 }
                             }
