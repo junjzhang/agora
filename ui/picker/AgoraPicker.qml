@@ -25,6 +25,11 @@ WlrLayershell {
     property string mode: "agents"
     property string agentGroupBy: "status"
 
+    // Tool paths. Picker QML lives outside the cargo build, so we don't get
+    // these from env. If the user installs elsewhere, override here.
+    readonly property string agora: "/home/jay/.local/bin/agora"
+    readonly property string dms: "dms"
+
     function toggle() { visible = !visible }
     function toggleMode(m) {
         if (visible && mode === m) { visible = false; return }
@@ -158,7 +163,7 @@ WlrLayershell {
 
     Process {
         id: stateProc
-        command: ["/home/jay/.local/bin/agora", "picker-state"]
+        command: [root.agora, "picker-state"]
         running: false
         stdout: StdioCollector {
             onStreamFinished: {
@@ -451,7 +456,7 @@ WlrLayershell {
             root.actionList = [{ section: "LOADING" }]
             root.actionIndex = 0
             actionsProc.running = false
-            actionsProc.command = ["/home/jay/.local/bin/agora", "actions", "project", item.id]
+            actionsProc.command = [root.agora, "actions", "project", item.id]
             actionsProc.running = true
             return
         }
@@ -482,7 +487,7 @@ WlrLayershell {
     }
 
     function runDaemonAction(target, id, actionId) {
-        Quickshell.execDetached(["/home/jay/.local/bin/agora", "run-action", target, id, actionId])
+        Quickshell.execDetached([root.agora, "run-action", target, id, actionId])
     }
 
     function getActions(item) {
@@ -500,15 +505,15 @@ WlrLayershell {
         if (item.type === "agent") {
             const actions = [
                 { section: "NAVIGATE" },
-                { label: "Focus terminal", key: "↵", run: () => Quickshell.execDetached(["/home/jay/.local/bin/agora", "focus-agent", item.sessionId]) },
+                { label: "Focus terminal", key: "↵", run: () => Quickshell.execDetached([root.agora, "focus-agent", item.sessionId]) },
             ]
             if (item.project) {
-                actions.push({ label: "Open project workspace", key: "", run: () => Quickshell.execDetached(["/home/jay/.local/bin/agora", "open", item.project]) })
+                actions.push({ label: "Open project workspace", key: "", run: () => Quickshell.execDetached([root.agora, "open", item.project]) })
             }
             actions.push({ section: "INFO" })
-            actions.push({ label: "Copy session ID", key: "⌥C", run: () => Quickshell.execDetached(["dms", "cl", "copy", item.sessionId]) })
+            actions.push({ label: "Copy session ID", key: "⌥C", run: () => Quickshell.execDetached([root.dms, "cl", "copy", item.sessionId]) })
             if (item.cwd) {
-                actions.push({ label: "Copy working directory", key: "", run: () => Quickshell.execDetached(["dms", "cl", "copy", item.cwd]) })
+                actions.push({ label: "Copy working directory", key: "", run: () => Quickshell.execDetached([root.dms, "cl", "copy", item.cwd]) })
             }
             return actions
         }
@@ -542,7 +547,7 @@ WlrLayershell {
             return
         }
         if (item.type === "agent") {
-            Quickshell.execDetached(["/home/jay/.local/bin/agora", "focus-agent", item.sessionId])
+            Quickshell.execDetached([root.agora, "focus-agent", item.sessionId])
             root.visible = false
             return
         }
@@ -1555,7 +1560,7 @@ WlrLayershell {
             opacity = 1
             nameInput.text = seedName
             if (wsId > 0) {
-                ctxProc.command = ["/home/jay/.local/bin/agora", "workspace-context", String(wsId)]
+                ctxProc.command = [panel.picker.agora, "workspace-context", String(wsId)]
                 ctxProc.running = true
             }
             nameInput.forceActiveFocus()
@@ -1594,7 +1599,7 @@ WlrLayershell {
                 return
             }
             let cmd = "niri msg action focus-workspace " + shq(panel.wsRef)
-            cmd += " && /home/jay/.local/bin/agora promote --name " + shq(name)
+            cmd += " && " + panel.picker.agora + " promote --name " + shq(name)
             if (host) cmd += " --host " + shq(host)
             for (const n of panel.availableLaunchers) {
                 if (panel.launchers[n]) cmd += " --launcher " + shq(n)
